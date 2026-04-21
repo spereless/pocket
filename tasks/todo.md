@@ -62,29 +62,62 @@ Wire OpenClaw in as the actual agent. Grok routes, OpenClaw answers.
 
 **Toolchain ready (done):** ESP-IDF v5.3.2 at `~/esp/esp-idf`, Python-3.12 shim at `~/.idfshim`, activation via `source firmware/activate-idf.sh`. Verified by building + flashing Waveshare's `05_LVGL_WITH_RAM` demo — screen lit up with their LVGL content. `firmware/lvgl-smoketest/` holds that build as a known-working reference.
 
-### M3a: Audio loopback + Wi-Fi on device (no bridge)
+### M3a: Audio loopback + Wi-Fi on device (no bridge) ✅
 
 Goal: prove the board can capture mic, play back through speaker, and connect to Wi-Fi. Zero network traffic to the bridge yet.
 
-- [ ] Scaffold `firmware/pocket/` from Waveshare's `06_I2SCodec` demo as the audio base
-- [ ] Confirm ES8311 init over I2C works (mic+speaker both live)
-- [ ] Configure I2S full-duplex at 24kHz mono, 16-bit
-- [ ] Plain loopback test: tap → capture 3s from mic → play back through speaker immediately
-- [ ] Add Wi-Fi station mode (SSID/password from sdkconfig or NVS), reconnect on drop
-- [ ] Print IP + signal strength over serial once connected
-- **Test:** Power on, wait for "Wi-Fi connected [ip]" on serial. Tap or trigger → hear your own voice replayed from the onboard speaker cleanly.
+- [x] Scaffold `firmware/pocket/` from Waveshare's `06_I2SCodec` demo as the audio base
+- [x] Confirm ES8311 init over I2C works (mic+speaker both live) — I2C 14/15, I2S MCK 16/BCK 9/WS 45/DO 8/DI 10, PA 46 all match ESP-BOX defaults
+- [x] Configure I2S — currently 16kHz stereo-16 per Espressif demo; bump to 24kHz mono in M3b when we match xAI's PCM format
+- [x] ~~Plain loopback test~~ → replaced with **record-then-play** (feedback-safe): capture 3s with PA gated off, then play buffer with PA on. Live loopback squealed on onboard mic/speaker (see lessons.md)
+- [x] Add Wi-Fi station mode (creds in gitignored `main/secrets.h`), reconnect on disconnect event
+- [x] Print IP + signal strength over serial once connected
+- **Test: PASSED** — on boot, serial shows `wifi: connected: ip=192.168.4.86 rssi=-36 dBm ssid=PerelessWifi`. Record-then-play cycle captures clean mic audio and plays it back through the onboard speaker at volume 80, mic gain 24dB. Audio task currently `#if 0`'d in app_main to keep the board silent between sessions — re-enable when starting M3b.
 
 ### M3b: WebSocket bridge + full voice loop
 
 Goal: board streams mic to bridge, bridge streams audio back, Grok answers audibly.
+Broken into 6 slices, each independently testable. See STATUS.md for current progress.
 
-- [ ] Add LAN WebSocket server to `bridge/` (new file, separate from xAI client) — binary frames for PCM, JSON for orb state
-- [ ] Replace Mac's mic/speaker (`sox`/`node-record-lpcm16`/`speaker`) in `voice.js` with the device's WebSocket as input/output
-- [ ] Firmware WebSocket client: stream mic PCM → bridge, decode audio frames from bridge → I2S speaker
-- [ ] Bridge forwards xAI state events (`speech_started`, `response.created`, `function_call.created`, `response.done`) to device as orb-state JSON
-- [ ] Minimal LVGL orb: static circle whose color changes with orb-state JSON (animation comes later — M4 territory if at all)
-- [ ] Tap via FT3168 to start/stop the session
-- **Test:** Power on, orb idles. Tap → speak → Grok answers through onboard speaker. Wi-Fi drop + reconnect doesn't brick it. Works on USB power (battery is M4).
+**Slice 1 — Bridge WS server + audio-IO refactor ✅**
+- [x] `bridge/device-ws.js` — WS server on port 8789, single client, binary = PCM16 @ 24 kHz mono
+- [x] `bridge/audio_io.js` — MacAudioIo / DeviceAudioIo behind `POCKET_MODE` env flag
+- [x] `bridge/device_loopback.js` — test client proving bridge plumbing before firmware
+- [x] `bridge/voice.js` — refactored to use the audio_io abstraction
+- **Test: PASSED** — `POCKET_MODE=device node voice.js` + `node device_loopback.js`, Mac→bridge→xAI→bridge→Mac loop sounded like M1
+
+**Slice 2 — Firmware WebSocket client ⚠️ FLAKY**
+- [x] Bump I2S to 24 kHz mono (match xAI's PCM format); MCLK_MULTIPLE = 256 (384 fails for ES8311)
+- [x] `firmware/pocket/main/bridge_ws.{c,h}` — esp_websocket_client wrapper with 96 KB rx ringbuf
+- [x] `secrets.h` gains `POCKET_BRIDGE_URL`
+- [x] Disable Wi-Fi power-save (PS=NONE) for sustained uplink
+- [x] Replace record-then-play with continuous `mic_task` + `spk_task`. 4 KB chunks (~85 ms). PA gated off when no rx. 1 s echo gate.
+- [ ] Live verify: user speaks into onboard mic → Grok reply plays from onboard speaker, no connection flap over a full session
+- **Test:** connection holds for ≥30 s under continuous streaming; user's question is transcribed on the bridge; reply is audible from the onboard speaker
+
+**Slice 3 — Orb UI (LVGL)**
+- [ ] Single filled circle, ~200 px radius, centered on AMOLED
+- [ ] Color per state per `docs/orb-ui.md` (`#1a1a3a` / `#00d8ff` / `#ffb020` / `#f0f0ff` / `#ff3030`)
+- [ ] Bridge sends `{ "orb": "..." }` JSON — firmware parses text frames and updates a FreeRTOS queue the LVGL task drains
+- [ ] Clears the stale LVGL-smoketest content that's currently stuck on the panel
+- **Test:** bridge-driven state changes visibly update the orb color with no obvious flicker
+
+**Slice 4 — Inputs**
+- [ ] Read BOOT button (GPIO 0) via ISR + debouncer; edge = session toggle. Send `{"kind":"button"}` to bridge.
+- [ ] FT3168 touch event on screen = interrupt. Send `{"kind":"tap"}` to bridge.
+- [ ] Firmware-local optimistic transitions match `docs/orb-ui.md` (button → listening; button again → thinking; tap during speaking → idle).
+- [ ] Gate mic uplink so it only streams during `listening`.
+- **Test:** button press flips orb to cyan and starts mic uplink; press again stops mic; tap during reply cancels playback and returns to idle
+
+**Slice 5 — Bridge state translation**
+- [ ] voice.js maps xAI events → `audio.sendState({orb: "..."})`: speech_started→listening, response.created→thinking, first output_audio.delta→speaking, response.done→idle, response.error→error (transient)
+- [ ] On Wi-Fi/bridge-WS lost events (server side knows via `disconnected` event), no-op — device handles those locally as error/persistent
+- **Test:** orb color sequence during a full voice turn goes idle → listening → thinking → speaking → idle
+
+**Slice 6 — Full test + polish**
+- [ ] Full M3b Test (see below) passes cleanly
+- [ ] Log any lessons. Decide what (if anything) to promote into M4.
+- **Test:** Power on, orb idles. Press BOOT → speak → Grok answers through onboard speaker. Wi-Fi drop + reconnect doesn't brick it. Works on USB power (battery is M4).
 
 ## M4: Portable polish
 

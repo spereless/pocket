@@ -1,10 +1,9 @@
 import 'dotenv/config';
 import WebSocket from 'ws';
-import record from 'node-record-lpcm16';
-import Speaker from 'speaker';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { createAudioIo } from './audio_io.js';
 
 const SAMPLE_RATE = 24000;
 const OPENCLAW_TIMEOUT_MS = 90_000;
@@ -17,9 +16,8 @@ if (!process.env.XAI_API_KEY?.startsWith('xai-')) {
 }
 
 let ws = null;
-let mic = null;
-let speaker = null;
 let sessionReady = false;
+const audio = createAudioIo({ sampleRate: SAMPLE_RATE });
 
 // Tool-call state. xAI Realtime uses a two-response pattern: the tool-call
 // response must close (response.done) before we may send response.create to
@@ -29,10 +27,6 @@ const pendingToolCalls = new Map(); // call_id -> { outputSent, turnClosed, repl
 const micBuffer = [];
 let bufferedBytes = 0;
 const MAX_BUFFER_BYTES = SAMPLE_RATE * 2 * 10;
-
-function makeSpeaker() {
-  return new Speaker({ channels: 1, bitDepth: 16, sampleRate: SAMPLE_RATE });
-}
 
 function askOpenclaw(prompt, onProc) {
   return new Promise((resolve) => {
@@ -162,10 +156,7 @@ function sendFunctionOutput(callId, output) {
 }
 
 function interrupt() {
-  if (speaker) {
-    try { speaker.destroy(); } catch {}
-    speaker = null;
-  }
+  audio.stopPlayback();
   cancelActiveTool('user interrupted');
   try {
     ws?.send(JSON.stringify({ type: 'response.cancel' }));
@@ -187,14 +178,8 @@ function flushMicBuffer() {
   bufferedBytes = 0;
 }
 
-function startMic() {
-  mic = record.record({
-    sampleRate: SAMPLE_RATE,
-    channels: 1,
-    audioType: 'raw',
-    recorder: 'sox',
-  });
-  mic.stream().on('data', (chunk) => {
+function startAudio() {
+  audio.onChunk((chunk) => {
     if (sessionReady) {
       sendAudioChunk(chunk);
     } else if (bufferedBytes + chunk.length <= MAX_BUFFER_BYTES) {
@@ -202,7 +187,7 @@ function startMic() {
       bufferedBytes += chunk.length;
     }
   });
-  mic.stream().on('error', (err) => console.error('[mic error]', err.message));
+  audio.start();
 }
 
 function connect() {
@@ -277,9 +262,8 @@ function connect() {
         break;
 
       case 'response.output_audio.delta': {
-        if (!speaker) speaker = makeSpeaker();
         const pcm = Buffer.from(event.delta, 'base64');
-        try { speaker.write(pcm); } catch {}
+        audio.play(pcm);
         break;
       }
 
@@ -294,10 +278,7 @@ function connect() {
         break;
 
       case 'response.done': {
-        if (speaker) {
-          try { speaker.end(); } catch {}
-          speaker = null;
-        }
+        audio.endResponse();
         // If this response was a tool-call turn, mark its calls as turnClosed
         // and try to drive the reply. A turn can contain multiple function_call items.
         const items = event.response?.output ?? [];
@@ -327,8 +308,7 @@ function connect() {
 }
 
 function shutdown() {
-  try { mic?.stop(); } catch {}
-  try { speaker?.destroy(); } catch {}
+  try { audio.stop(); } catch {}
   try { ws?.close(); } catch {}
   setTimeout(() => process.exit(0), 150);
 }
@@ -336,5 +316,5 @@ function shutdown() {
 process.on('SIGINT', () => { console.log('\n[shutdown]'); shutdown(); });
 process.on('SIGTERM', shutdown);
 
-startMic();
+startAudio();
 connect();

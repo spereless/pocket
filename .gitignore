@@ -16,6 +16,7 @@ firmware/**/.pio/
 firmware/**/sdkconfig
 firmware/**/sdkconfig.old
 firmware/**/managed_components/
+firmware/**/main/secrets.h
 
 .vscode/
 .idea/
