@@ -1,0 +1,17 @@
+.env
+.env.*
+.DS_Store
+
+node_modules/
+dist/
+build/
+
+# ESP-IDF / Arduino build artifacts
+firmware/build/
+firmware/.pio/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+.vscode/
+.idea/
+*.swp
