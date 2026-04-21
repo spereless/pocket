@@ -1,0 +1,71 @@
+dependencies:
+  esp_lcd_sh8601:
+    dependencies: []
+    source:
+      path: /Users/jarvis/Desktop/pocket/firmware/lvgl-smoketest/components/esp_lcd_sh8601
+      type: local
+    version: 1.0.0
+  espressif/cmake_utilities:
+    dependencies: []
+    source:
+      path: /Users/jarvis/Desktop/pocket/firmware/lvgl-smoketest/components/espressif__cmake_utilities
+      type: local
+    version: 0.5.3
+  espressif/esp_io_expander:
+    component_hash: 7b7f91270172e46ca4597e3874f48d8412e280e8c295559f5922ec38656e3e5f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.2.1
+  espressif/esp_io_expander_tca9554:
+    component_hash: e9e49ddb1038c2b54b13c51b5e3e6dbdd10a878959c8ab0e0a7c8206316add61
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    - name: espressif/esp_io_expander
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0.1
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.1
+  espressif/esp_lcd_touch:
+    dependencies: []
+    source:
+      path: /Users/jarvis/Desktop/pocket/firmware/lvgl-smoketest/components/espressif__esp_lcd_touch
+      type: local
+    version: 1.1.1
+  espressif/esp_lcd_touch_ft5x06:
+    dependencies: []
+    source:
+      path: /Users/jarvis/Desktop/pocket/firmware/lvgl-smoketest/components/espressif__esp_lcd_touch_ft5x06
+      type: local
+    version: 1.0.6
+  idf:
+    source:
+      type: idf
+    version: 5.3.2
+  lvgl/lvgl:
+    component_hash: d7c1ac037ae6e85d94897f807d6e7ba0946a83e720074fc95a4f6241da9f9f53
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 8.4.0
+direct_dependencies:
+- esp_lcd_sh8601
+- espressif/cmake_utilities
+- espressif/esp_io_expander_tca9554
+- espressif/esp_lcd_touch
+- espressif/esp_lcd_touch_ft5x06
+- idf
+- lvgl/lvgl
+manifest_hash: 73d297b75a367c5296e4d374a0f8c4b79f7221d608e54c991bf3dd251ed9384f
+target: esp32s3
+version: 2.0.0

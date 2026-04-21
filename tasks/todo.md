@@ -44,30 +44,47 @@ Prove the full voice pipeline using the Mac's own mic/speakers. Firmware still u
 - [x] Lazy-create speaker per response (fixes CoreAudio buffer-underflow warnings)
 - **Test: PASSED** — `node voice.js`, spoke to Mac, Grok (Eve) answered through Mac speakers, interruption worked, no audio artifacts.
 
-## M2: `ask_openclaw` function tool
+## M2: `ask_openclaw` function tool ✅
 
 Wire OpenClaw in as the actual agent. Grok routes, OpenClaw answers.
 
-- [ ] Add `function` tool `ask_openclaw(prompt: string)` to `session.update`
-- [ ] System instruction: "For anything about the user's email, calendar, files, tasks, or personal context, call ask_openclaw. Otherwise answer from your own knowledge."
-- [ ] On `response.function_call_arguments.done`: spawn OpenClaw CLI with the prompt, capture stdout, return via `conversation.item.create` with `function_call_output`
-- [ ] Send `response.create` to let Grok continue with the tool output
-- [ ] Handle CLI errors (nonzero exit, timeout > 30s) — return the error string so Grok can explain it to the user
-- **Test:** Ask "what emails did I get today?" — Grok calls ask_openclaw → OpenClaw returns real data → Grok speaks it. Same question in Telegram returns the same facts.
+- [x] Add `function` tool `ask_openclaw(prompt: string)` to `session.update`
+- [x] System instruction: route personal-data questions to `ask_openclaw`, answer everything else directly
+- [x] Handle `response.function_call_arguments.done`: spawn OpenClaw, capture stdout, return `function_call_output`
+- [x] **Deferred `response.create`**: only fire after the tool-call turn's own `response.done`, otherwise Grok never speaks the result (see lessons.md)
+- [x] Use `openclaw gateway call agent --expect-final --json` with stable `sessionKey: agent:main:pocket` for session warmth + ~2× speedup over `openclaw agent`
+- [x] Parse `result.meta.finalAssistantVisibleText` with fallbacks to `.finalAssistantRawText` and `.payloads[0].text`
+- [x] Error handling: nonzero exit, timeout, JSON parse fail all return a readable error string for Grok to speak
+- [x] Cancel in-flight tool calls on user interrupt or when superseded by a newer call (SIGKILL subprocess, drop stale result)
+- **Test: PASSED** — asked "how many nightly brainstorms do I have?" → ask_openclaw fired → OpenClaw returned "11 files Apr 8–18" → Grok spoke it. Math questions stayed direct. Supersede/cancel proven by rephrase mid-question (only the final answer was spoken).
 
-## M3: ESP32 firmware — I2S audio + orb + WebSocket
+## M3: ESP32 firmware — split into M3a / M3b
 
-The actual pocket device. Big milestone; split if it gets unwieldy.
+**Toolchain ready (done):** ESP-IDF v5.3.2 at `~/esp/esp-idf`, Python-3.12 shim at `~/.idfshim`, activation via `source firmware/activate-idf.sh`. Verified by building + flashing Waveshare's `05_LVGL_WITH_RAM` demo — screen lit up with their LVGL content. `firmware/lvgl-smoketest/` holds that build as a known-working reference.
 
-- [ ] ESP-IDF project scaffold based on Waveshare's AMOLED-1.8 demo (start from their reference, not from scratch)
-- [ ] Wi-Fi station mode with stored creds; reconnect on drop
-- [ ] ES8311 init over I2C; I2S peripheral configured full-duplex 24kHz 16-bit mono
-- [ ] WebSocket client to the bridge; binary frames for PCM, JSON frames for orb state
-- [ ] LVGL orb: one animated sphere that scales/glows based on `{idle, listening, speaking, thinking}`
-- [ ] Tap input via FT3168: tap anywhere toggles session start/stop
-- [ ] Mic → bridge streaming; bridge → speaker playback
+### M3a: Audio loopback + Wi-Fi on device (no bridge)
+
+Goal: prove the board can capture mic, play back through speaker, and connect to Wi-Fi. Zero network traffic to the bridge yet.
+
+- [ ] Scaffold `firmware/pocket/` from Waveshare's `06_I2SCodec` demo as the audio base
+- [ ] Confirm ES8311 init over I2C works (mic+speaker both live)
+- [ ] Configure I2S full-duplex at 24kHz mono, 16-bit
+- [ ] Plain loopback test: tap → capture 3s from mic → play back through speaker immediately
+- [ ] Add Wi-Fi station mode (SSID/password from sdkconfig or NVS), reconnect on drop
+- [ ] Print IP + signal strength over serial once connected
+- **Test:** Power on, wait for "Wi-Fi connected [ip]" on serial. Tap or trigger → hear your own voice replayed from the onboard speaker cleanly.
+
+### M3b: WebSocket bridge + full voice loop
+
+Goal: board streams mic to bridge, bridge streams audio back, Grok answers audibly.
+
+- [ ] Add LAN WebSocket server to `bridge/` (new file, separate from xAI client) — binary frames for PCM, JSON for orb state
+- [ ] Replace Mac's mic/speaker (`sox`/`node-record-lpcm16`/`speaker`) in `voice.js` with the device's WebSocket as input/output
+- [ ] Firmware WebSocket client: stream mic PCM → bridge, decode audio frames from bridge → I2S speaker
 - [ ] Bridge forwards xAI state events (`speech_started`, `response.created`, `function_call.created`, `response.done`) to device as orb-state JSON
-- **Test:** Power on, orb idles. Tap → listening, speak → thinking → speaking, Grok answers audibly through the onboard speaker. Walk across the house; Wi-Fi reconnects cleanly. Works on USB power.
+- [ ] Minimal LVGL orb: static circle whose color changes with orb-state JSON (animation comes later — M4 territory if at all)
+- [ ] Tap via FT3168 to start/stop the session
+- **Test:** Power on, orb idles. Tap → speak → Grok answers through onboard speaker. Wi-Fi drop + reconnect doesn't brick it. Works on USB power (battery is M4).
 
 ## M4: Portable polish
 

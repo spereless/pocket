@@ -1,50 +1,49 @@
 # Status
 
 ## Current Milestone
-M2 — `ask_openclaw` function tool
+M3a — Audio loopback + Wi-Fi on device (no bridge yet)
 
 ## In Progress
-Starting M2. M0 and M1 done this session. Next: add a single `function` tool to the xAI session config so Grok can delegate to OpenClaw. When Grok decides it needs the user's real data (email, calendar, files, personal context), it calls `ask_openclaw(prompt)`; the bridge shells out to the OpenClaw CLI, captures stdout, returns it as the function output, and lets Grok speak the answer.
+M3 bootstrap is complete: ESP-IDF toolchain installed, Waveshare's reference demo built and flashed, AMOLED screen confirmed lit. That's the "whole pipeline works on this Mac and this board" proof. Next real code step is scaffolding `firmware/pocket/` from Waveshare's `06_I2SCodec` audio demo and getting mic → speaker loopback running on the device.
 
 ## Done this session
-- Pivoted vision from glance-and-tap cards to pocket voice agent (Grok voice + OpenClaw as a tool)
-- Corrected CLAUDE.md hardware spec (board has onboard mic/speaker/ES8311/AXP2101/Li-ion header)
-- Rewrote VISION / todo / backlog / CLAUDE around voice-first
-- **M0 passed**: `smoketest.js` proves xAI Realtime auth + WebSocket + WAV roundtrip
-- **M1 passed**: `voice.js` runs a full voice loop on the Mac — mic capture (sox + node-record-lpcm16), Speaker playback, VAD turn-taking, interruption, clean shutdown
-- Logged the Speaker lifecycle fix in lessons.md (create-per-response, not create-once)
+- Verified Mac sees the board at `/dev/cu.usbmodem31201` (no driver needed — ESP32-S3 native USB)
+- Installed ESP-IDF v5.3.2 under `~/esp/esp-idf` + toolchain under `~/.espressif`
+- Worked around Python 3.9 dep-check bug via `~/.idfshim/python3 → python3.12` (see lessons.md)
+- Wrote `firmware/activate-idf.sh` — sourced to enter an IDF shell cleanly
+- Installed `cmake` + `ninja` via Homebrew
+- Cloned Waveshare's reference repo and copied `05_LVGL_WITH_RAM` to `firmware/lvgl-smoketest/`
+- Built it (~5 min, pulled display/LVGL components from Espressif component registry)
+- Flashed via `idf.py -p /dev/cu.usbmodem31201 flash` — board reset, AMOLED lit up with demo content
+- Split M3 into M3a (on-device loopback + Wi-Fi) and M3b (WebSocket to bridge + full voice loop) so each has a testable endpoint
 
 ## Context
 
-**Architecture (unchanged):**
+**Architecture (still the plan):**
 ```
 [ESP32-S3 + mic/speaker/orb]  ←WiFi WebSocket→  [Bridge on Mac Mini]
                                                        ↕
-                                                [xAI Realtime]
-                                                       ↕
-                                                ask_openclaw(prompt)
-                                                       ↕
-                                                [OpenClaw CLI]
+                                                [xAI Realtime] ↔ [openclaw gateway call agent]
 ```
 
-**What M1 proved:** full voice pipeline works on commodity audio hardware. Mic PCM streams up, audio deltas stream down, server VAD handles turn-taking, interruption is immediate. When we flash the ESP32 in M3, we're porting a proven pipeline — not debugging it from scratch on device.
+**Dev workflow from here:**
+```
+cd ~/Desktop/pocket
+source firmware/activate-idf.sh           # sets PATH, env, IDF_PATH
+idf.py -C firmware/<project> set-target esp32s3   # once per project
+idf.py -C firmware/<project> build
+idf.py -C firmware/<project> -p /dev/cu.usbmodem31201 flash monitor
+```
 
-**What M2 adds:** the OpenClaw delegation. After M2, Grok stops answering from its own knowledge for anything user-specific and calls the tool instead. This is the moment Pocket becomes useful — voice in, real data out, voice back.
+**Known-good reference:** `firmware/lvgl-smoketest/` — Waveshare's `05_LVGL_WITH_RAM` sample, unmodified. Keep it around as a sanity-check baseline if things break mysteriously later — rebuild/reflash it to isolate board-vs-code issues.
 
-**Blocker before code:** need the actual OpenClaw CLI invocation shape. Specifically:
-1. Command name (is it `openclaw`, `claw`, `npx openclaw`, something else?)
-2. How do you pass a prompt — positional arg? `--prompt`? stdin?
-3. Does it answer once and exit (one-shot), or is it interactive/streaming?
-4. Where does the answer go — stdout? Or does it print logs mixed in?
-5. Auth — does it read a config/key from somewhere? Already set up on this Mac?
+**Waveshare repo cloned to `/tmp/ws-amoled-peek`** (shallow clone, not committed). For M3a we want their `examples/ESP-IDF-v5.3.2/06_I2SCodec/` as the starting point. Copy it to `firmware/pocket/` when we're ready to start modifying code. Don't commit the whole Waveshare repo — just the files we fork from it.
 
-Ask the user for the exact invocation that works today, or ask them to show one running.
-
-**Key docs:**
-- https://docs.openclaw.ai/start/getting-started — OpenClaw CLI docs (user-provided)
-- https://github.com/openclaw/openclaw — source
-- `/Users/jarvis/Desktop/instructions.md` §4 "Custom function call flow" for the xAI side
+**Biggest risks for M3a (in order):**
+1. Waveshare's I2SCodec demo probably plays a bundled audio file, not mic loopback. We'll have to adapt it to capture from the onboard mic and route straight back to the speaker.
+2. Wi-Fi credentials — board has to know the SSID/password. Easiest path: ESP-IDF `menuconfig` → Example Connection Configuration. Skip NVS provisioning until M4.
+3. I2S full-duplex on ES8311 — needs both RX and TX channels on the same I2S peripheral. The demo may only configure TX. This is the one thing most likely to eat a chunk of time.
 
 ## Next Action
 
-Ask the user for the OpenClaw CLI invocation shape (command, prompt arg format, one-shot vs streaming, stdout vs mixed). Do NOT guess the binary name. Once confirmed, add the `function` tool to `voice.js` session.update and handle `response.function_call_arguments.done` by spawning the CLI.
+Copy `/tmp/ws-amoled-peek/examples/ESP-IDF-v5.3.2/06_I2SCodec/` to `firmware/pocket/`. Build it as-is and flash it to confirm the speaker plays the bundled audio. Only then start modifying — first change is mic-to-speaker loopback. Don't add Wi-Fi until audio works (one variable at a time).

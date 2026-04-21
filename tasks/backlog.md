@@ -15,6 +15,7 @@ Ideas that arrived too early. Don't touch until v0 (M0–M4) is in daily use and
 - Web dashboard on `localhost:3000` showing live transcript + token usage
 - Local STT/TTS fallback (Whisper + Piper) for when the LAN has no internet
 - Prompt caching on the xAI session to cut cost/latency for repeated system instructions
+- **Pair the bridge as an OpenClaw device** so `ask_openclaw` can talk to the gateway over a persistent WebSocket (like Telegram does) instead of spawning `openclaw gateway call agent` per request. Saves ~1–2s per tool call. Blocked on: `openclaw devices approve` pairing flow, storing a device id + private key in `bridge/.env`, and handling the signed-nonce connect handshake. Only worth doing after M3 when every ms matters for pocket feel.
 
 ## Device capabilities
 - Multiple ESP32s (bedroom, kitchen) sharing the same bridge, each claiming the session exclusively

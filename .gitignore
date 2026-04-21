@@ -11,10 +11,11 @@ bridge/out.wav
 bridge/*.wav
 
 # ESP-IDF / Arduino build artifacts
-firmware/build/
-firmware/.pio/
-firmware/sdkconfig
-firmware/sdkconfig.old
+firmware/**/build/
+firmware/**/.pio/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+firmware/**/managed_components/
 
 .vscode/
 .idea/
