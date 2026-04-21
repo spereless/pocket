@@ -1,6 +1,6 @@
 # Pocket
 
-Glance-and-tap companion for the OpenClaw agent running on the Mac Mini. ESP32-S3 AMOLED on the LAN, tiny Node sidecar on the Mac. Single user, single device, weekend-sized.
+Pocketable voice companion for the OpenClaw agent on the Mac Mini. Waveshare ESP32-S3 AMOLED (onboard mic + speaker + battery) talks to a Node bridge on the Mac over LAN; the bridge talks to xAI Realtime (Grok handles voice), which delegates real agent work to OpenClaw via a single `ask_openclaw` function tool. Single user, single device.
 
 ## On Boot
 1. Read `tasks/STATUS.md` — cold start briefing
@@ -28,8 +28,8 @@ Milestones are living. Split them, cut them, change them. New ideas mid-build go
 ## Repo layout (to be created in M0)
 
 ```
-bridge/    Node service on the Mac Mini, sits next to OpenClaw
-firmware/  ESP32-S3 firmware (Arduino or ESP-IDF + LVGL)
+bridge/    Node service on the Mac Mini — xAI Realtime client + LAN WebSocket server + OpenClaw tool
+firmware/  ESP32-S3 firmware (ESP-IDF + LVGL) — I2S audio, WebSocket, orb UI
 docs/      Notes as they become useful — not a dumping ground
 tasks/     todo.md / STATUS.md / lessons.md / backlog.md
 ```
@@ -38,22 +38,36 @@ tasks/     todo.md / STATUS.md / lessons.md / backlog.md
 
 ## Hardware (already owned)
 
-- **Mac Mini** — already runs OpenClaw. Do not disrupt it. Add sidecar service alongside.
-- **Waveshare ESP32-S3 1.8" AMOLED board** — 368×448, SH8601 display driver (QSPI), FT3168 capacitive touch, QMI8658 6-axis IMU, Wi-Fi 2.4 GHz, BLE 5, USB-C, JST Li-ion connector.
+- **Mac Mini** — already runs OpenClaw. Do not disrupt it. Add bridge service alongside.
+- **Waveshare ESP32-S3-Touch-AMOLED-1.8** — 368×448 AMOLED (SH8601 QSPI), FT3168 capacitive touch, QMI8658 6-axis IMU, **ES8311 mono audio codec**, **onboard microphone**, **onboard speaker**, AXP2101 PMIC, MX1.25 Li-ion header, 16MB flash + 8MB PSRAM, Wi-Fi 2.4 GHz, BLE 5, USB-C.
 
-Same LAN, talking over WebSocket. No cloud.
+Self-contained: device captures and plays audio on its own. LAN WebSocket to the bridge; bridge is the only thing that talks to the cloud.
+
+---
+
+## Architecture
+
+```
+[ESP32-S3 + mic/speaker/orb]  ←WiFi WebSocket→  [Bridge on Mac Mini]
+                                                       ↕
+                                                [xAI Realtime]
+                                                       ↕
+                                                ask_openclaw(prompt)
+                                                       ↕
+                                                [OpenClaw CLI]
+```
 
 ---
 
 ## Ground rules
 
 - Plan before building. Confirm scope with the user before touching code.
-- **First task of M0 is figuring out how OpenClaw exposes events on this Mac** — everything downstream depends on it. Do not guess. Inspect the install, read its docs, or ask the user.
-- One milestone at a time.
+- One milestone at a time. Don't start M1 before M0's Test passes.
 - Never mark done without proving the **Test:** line.
 - Log failures to `lessons.md` immediately.
+- Bridge holds the xAI API key. **Never** put it on the ESP32 or in client-exposed code.
 - If it starts feeling like a startup again, stop and re-read VISION.md.
-- No iOS app, no cloud hosting, no OTA pipeline, no custom enclosure. If the answer gets complicated, the question is wrong.
+- No iOS app, no multi-device, no OTA pipeline, no custom enclosure, no second routines. Pocket is one tap, one question, one answer.
 
 ---
 

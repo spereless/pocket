@@ -1,42 +1,61 @@
 # Pocket
 
-A small, always-on companion surface for the OpenClaw agent already running on the Mac Mini. Uses the Waveshare ESP32-S3 1.8" AMOLED board (already owned) as a glance-and-tap device on the same LAN.
+A pocketable, always-on voice companion for the OpenClaw agent already running on the Mac Mini. Uses the Waveshare ESP32-S3 1.8" AMOLED (already owned, onboard mic + speaker + battery) as a handheld device on the LAN.
 
-**What it is:** a pocketable screen + button for the agent that lives on the Mac. Shows what the agent is doing, surfaces approvals, displays scheduled briefs. Taps flow back to OpenClaw.
+**What it is:** a small object you carry around. Tap to talk, speak naturally, get answers out loud. Under the hood, xAI's Grok handles realtime voice (STT + LLM + TTS + VAD + interruption) and delegates agent work to OpenClaw via a single function tool. A ChatGPT-style animated orb lives on the AMOLED.
 
-**What it is not:** a product. Not a startup. No cloud, no iOS app, no enclosure, no OTA, no pilot users, no subscription. Single user, LAN-only, one device, one Mac.
+**What it is not:** a product. No startup, no iOS app, no enclosure, no multi-user, no OTA, no cloud backend of our own. Single user, single device, single Mac, single cloud API (xAI).
 
-**Why bother:** today, when OpenClaw needs your attention (an email drafted, a task finished, a decision needed), you have to open the laptop to see it. Pocket closes that loop on a small screen you can glance at without switching context.
+**Why bother:** today OpenClaw is reached via Telegram — tethered to the phone, thumb-driven, not hands-free. Pocket makes the agent an object you can hold and talk to while doing something else.
 
 ---
 
 ## v0 scope
 
-Three screens on the ESP32:
+**Hardware:** Waveshare ESP32-S3-Touch-AMOLED-1.8. Onboard mic, speaker, ES8311 codec, AXP2101 PMIC, Li-ion header, 8MB PSRAM, Wi-Fi, touch, IMU. Self-contained — no add-ons needed.
 
-1. **Idle** — time, next scheduled routine, "OpenClaw is…" status, last action summary.
-2. **Approval** — when an agent task needs yes/no, device wakes, shows the ask, big Approve/Deny touch targets.
-3. **Briefs** — rotating cards for a morning brief routine (weather, watchlist, calendar, unread-important).
+**Device UI:** a single screen — a ChatGPT-style animated orb on black. State drives the animation: idle (still), listening (user speaking), speaking (assistant speaking), thinking (waiting on a tool call). Tap anywhere to start or stop a session.
 
-Two pieces of software:
+**Software:**
 
-- **`bridge/`** — tiny Node service on the Mac Mini that sits next to OpenClaw, relays events to the ESP32 over a LAN WebSocket, and exposes approval responses back to OpenClaw (integration path TBD in M0).
-- **`firmware/`** — ESP32-S3 firmware (Arduino or ESP-IDF + LVGL). WebSocket client, three-screen state machine, touch input, brightness/IMU-wake.
+- **`bridge/`** — Node service on the Mac Mini. Two WebSockets: one to the device over LAN (carries audio frames + orb state), one to xAI Realtime over WAN (carries Grok voice). Registers a single function tool, `ask_openclaw(prompt)`, which shells to the OpenClaw CLI and returns the result as the function output.
+- **`firmware/`** — ESP32-S3 firmware (ESP-IDF + LVGL). Captures I2S audio from the onboard mic via ES8311, streams it to the bridge. Plays PCM received from the bridge through the onboard speaker. Renders the orb. Manages Wi-Fi, reconnect, and tap input.
 
-**Deploy:** `pm2 restart pocket-bridge` on the Mac. `esptool flash` on the ESP32.
+**Deploy:** `pm2 restart pocket-bridge` on the Mac · `idf.py flash` on the ESP32.
+
+---
+
+## Architecture
+
+```
+[ESP32-S3 + mic/speaker/orb]  ←WiFi WebSocket→  [Bridge on Mac Mini]
+                                                       ↕
+                                                [xAI Realtime]
+                                                       ↕
+                                                ask_openclaw(prompt)
+                                                       ↕
+                                                [OpenClaw CLI]
+```
+
+The bridge is the brain-broker: it holds the xAI API key, runs OpenClaw invocations on the Mac where OpenClaw lives, and relays audio + orb state between device and cloud. The device is a dumb microphone/speaker/display on the LAN.
 
 ---
 
 ## Out of scope for v0
 
-Voice, wake-word, iOS app, cloud hosting, multi-user, per-device auth, OTA updates, custom enclosure, battery, HomeKit/Matter, skills marketplace. Earn each of these by actually using v0 for a week first.
+- Wake-word (tap-to-talk only; earn wake-word later if tap friction is real)
+- iOS app, multi-device, multi-user, per-device auth
+- OTA updates, cloud hosting of the bridge
+- Custom enclosure (the dev board is the enclosure)
+- Scheduled routines, morning briefs, card history, transcript UI — all from the old glance-and-tap vision, now in backlog
+- Any function tool beyond `ask_openclaw`
 
 ---
 
 ## Success criteria
 
-- You use it unprompted at least 3 days in the first week after it works.
-- At least one OpenClaw outbound action this month gets approved/denied from the ESP32 instead of the laptop.
-- Morning brief lands on the device by 7:30 daily without you triggering it.
+- You use Pocket daily for a week without going back to Telegram for OpenClaw.
+- At least one real agent task completed fully by voice (no laptop, no phone) in that week.
+- Latency feels conversational — you don't stop using it because the wait is annoying.
 
-If none of these are true after two weeks, Pocket is the wrong idea — don't keep building.
+If none of these are true after two weeks, Pocket is the wrong idea — stop building and go back to Telegram.

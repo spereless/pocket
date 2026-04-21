@@ -1,27 +1,42 @@
 # Backlog
 
-Ideas that arrived too early. Don't touch until v0 (M0–M2) is in daily use and earning its keep.
+Ideas that arrived too early. Don't touch until v0 (M0–M4) is in daily use and earning its keep.
 
-## Device capabilities
-- Voice push-to-talk via USB mic on the Mac (firmware side: button triggers streaming to bridge)
-- Wake-word detection on the ESP32 using the onboard mic footprint (if present on this SKU — verify)
-- Haptic-style buzz via the IMU + speaker for attention grabs
-- Multiple ESP32 devices around the house (bedroom, kitchen) sharing the same bridge
+## Voice UX
+- Wake-word ("hey pocket") via onboard mic so tap-to-talk isn't required
+- Push-to-talk physical button (BOOT or PWM button remapped)
+- Face-down or pocket-in gesture via IMU to mute the mic
+- Voice-level visualizer on the orb (RMS amplitude drives scale)
+- Multiple voices selectable per session (Eve / Ara / Leo / Rex / Sal)
 
 ## Bridge features
-- Card history — scroll back through today's agent activity from the device
-- Second scheduled routine (TBD — whichever one you actually want after M2)
-- Per-category notifications with different priorities (Slack DM vs GitHub vs spam)
-- Web dashboard on `localhost:3000` showing what's been sent to the device
+- Transcript history on the device — scroll back through the day's exchanges
+- A second function tool if some category of question turns out badly through OpenClaw
+- Web dashboard on `localhost:3000` showing live transcript + token usage
+- Local STT/TTS fallback (Whisper + Piper) for when the LAN has no internet
+- Prompt caching on the xAI session to cut cost/latency for repeated system instructions
+
+## Device capabilities
+- Multiple ESP32s (bedroom, kitchen) sharing the same bridge, each claiming the session exclusively
+- Haptic-style buzz via the speaker for notification attention-grabs
+- Display the current weather / time / last message when idle (ambient mode)
 
 ## Integrations
-- Stock market alert screen (the original idea that kicked this off — revisit after approvals work)
-- Home Assistant read-only tiles
-- A "quick pocket tool" OpenClaw can call: "show this on the device for me"
+- Stock market alert voice-push ("NVDA just moved 3%") — original idea that kicked the project off
+- Home Assistant voice control via an extra function tool
+- A "show this on pocket" tool OpenClaw can call to push a visual (map, image, QR) to the device during a voice session
+
+## Pre-voice-pivot ideas (superseded but archived)
+These were the original v0 before the pivot to voice-first. Keep here in case any of them become useful alongside the voice UI later.
+- Idle screen: time, next scheduled routine, "OpenClaw is…" status, last action summary
+- Approval screen: when an agent task needs yes/no, device wakes, shows the ask, big Approve/Deny touch targets
+- Briefs screen: rotating cards for a morning brief (weather, watchlist, calendar, unread-important)
+- Scheduled morning brief at 7:30 pushing cards to the device
+- Card-history scrollback of today's agent activity
 
 ## Someday, maybe
-- iOS companion (only if leaving the house with the device becomes a real use case)
-- Cloud hosting (only if it stops being a single-user project)
+- iOS companion (only if leaving the house becomes a real use case)
+- Cloud hosting of the bridge (only if this stops being a single-user project — it won't)
 - Custom enclosure (only once the software is so good you want to hide the dev board)
 - Consumer-product version (only if many people ask to buy one — they won't, and that's fine)
 

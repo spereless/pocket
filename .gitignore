@@ -6,6 +6,10 @@ node_modules/
 dist/
 build/
 
+# bridge: generated audio artifacts from smoketests
+bridge/out.wav
+bridge/*.wav
+
 # ESP-IDF / Arduino build artifacts
 firmware/build/
 firmware/.pio/

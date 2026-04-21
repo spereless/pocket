@@ -1,60 +1,89 @@
 # Pocket
 
-ESP32-S3 AMOLED companion for OpenClaw running on the Mac Mini. Weekend-sized.
+Pocket voice agent on the ESP32-S3 AMOLED. Grok handles voice (xAI Realtime), OpenClaw handles agent work (via `ask_openclaw` function tool).
 
-**Stack:** Node (Mac sidecar) + WebSocket on LAN + ESP32-S3 firmware with LVGL
-**Deploy:** `pm2 restart pocket-bridge` on the Mac · `esptool flash` on the ESP32
+**Stack:** Node (Mac bridge) + xAI Realtime WebSocket + ESP-IDF/LVGL firmware
+**Deploy:** `pm2 restart pocket-bridge` on the Mac · `idf.py flash` on the ESP32
 
 ## v0 Scope
-- Idle screen, Approval screen, Briefs screen
-- Mac sidecar that relays OpenClaw events → ESP32 and approval responses → OpenClaw
-- One scheduled routine (morning brief) that pushes cards to the device
+- Bridge on Mac Mini: xAI Realtime client, LAN WebSocket server for the device, one function tool wired to the OpenClaw CLI
+- ESP32 firmware: I2S mic/speaker via ES8311, WebSocket client, orb UI, tap-to-talk
+- One end-to-end path: tap → speak → Grok answers (or calls ask_openclaw → OpenClaw answers → Grok speaks it)
 
 ## Not v0 (go to backlog.md if tempted)
-- Voice, wake-word, iOS app
-- Cloud hosting, multi-user, per-device auth, OTA
-- Custom enclosure, battery, HomeKit/Matter
-- More than one ESP32 device
-- Fancy memory / analytics / dashboards
+- Wake-word, multi-device, iOS app, OTA
+- Scheduled routines (morning brief, etc.)
+- Card history, transcript display, non-voice UI
+- Custom enclosure, deep battery optimization
+- Multiple function tools beyond ask_openclaw
+- Anything not on the path tap → speak → answer
 
 ---
 
-## M0: Understand OpenClaw on this Mac
+## M0: xAI Realtime — text loop on the bridge ✅
 
-The most important hour of the project. Everything after depends on it.
+Prove the API works. No audio capture yet.
 
-- [ ] Find the OpenClaw install on the Mac Mini (ask user for path; likely a cloned repo or global npm)
-- [ ] Skim its README + `docs/` to learn how it exposes events, hooks, or tools — answer these three:
-  1. How does an outbound action (send email, etc.) get gated today? Is there an approval hook or does it just run?
-  2. Can we register a custom tool/skill/plugin that OpenClaw will call (e.g. a `pocket.approve(...)` tool)?
-  3. Does OpenClaw emit events anywhere (log file, SQLite, IPC, webhooks) that a sidecar could subscribe to?
-- [ ] Write findings to `docs/openclaw-integration.md` — one page, concrete, with file paths and code references
-- [ ] Pick the integration strategy (plugin / webhook / tool-call / log-tail) and note it in STATUS.md
-- **Test:** You can describe in one paragraph exactly how a pending approval will get from OpenClaw to the bridge, and a tap-response from the bridge back to OpenClaw.
+- [x] Confirm xAI API key with Voice endpoint enabled (console.x.ai → API Keys)
+- [x] `bridge/` scaffold: Node project, `ws` + `dotenv`, `.env` with `XAI_API_KEY`, `.gitignore` the env
+- [x] `bridge/smoketest.js`: connect to `wss://api.x.ai/v1/realtime`, send `session.update` with voice + `input_audio_transcription`
+- [x] Send a text message via `conversation.item.create` + `response.create`
+- [x] Log every event type received; accumulate `response.output_audio.delta` chunks into a WAV file
+- **Test: PASSED** — `node smoketest.js "Say hello from Pocket..."` wrote `out.wav` (1.47s), played back Grok (voice: Eve) saying "Hello from Pocket!"
 
-## M1: Bridge stub + ESP32 idle screen
+## M1: Voice loop on the Mac ✅
 
-End-to-end skeleton, no real OpenClaw integration yet.
+Prove the full voice pipeline using the Mac's own mic/speakers. Firmware still untouched.
 
-- [ ] `bridge/`: Node project with `ws` server, a fake-event injector (`curl -X POST /fake-approval`), and a handler for device responses that just logs them
-- [ ] `bridge/` runs under pm2 on the Mac Mini
-- [ ] `firmware/`: ESP32-S3 project (Arduino-ESP32 + LVGL is the fastest path given Waveshare has demos for this exact board)
-- [ ] Device connects to LAN Wi-Fi, opens WebSocket to the bridge, shows an idle screen (clock + "Connected to OpenClaw" + last-event line)
-- [ ] Reconnect logic on the device (Wi-Fi drops, bridge restart)
-- **Test:** Power on device → shows idle with current time → `curl` a fake approval → device renders it → tap Approve → bridge logs "approved: <id>".
+- [x] Mic capture: `node-record-lpcm16` + `sox` (`brew install sox`) at 24kHz 16-bit mono
+- [x] Speaker playback: `speaker` npm package at 24kHz
+- [x] Stream mic PCM → base64 → `input_audio_buffer.append`
+- [x] On `response.output_audio.delta`: decode base64 → write to speaker
+- [x] Handle `input_audio_buffer.speech_started`: destroy speaker, send `response.cancel`
+- [x] Graceful shutdown on Ctrl-C (stop mic, close WS, end speaker)
+- [x] Lazy-create speaker per response (fixes CoreAudio buffer-underflow warnings)
+- **Test: PASSED** — `node voice.js`, spoke to Mac, Grok (Eve) answered through Mac speakers, interruption worked, no audio artifacts.
 
-## M2: Real OpenClaw integration + one useful routine
+## M2: `ask_openclaw` function tool
 
-- [ ] Implement the integration strategy from M0 — the bridge now receives real approval requests from OpenClaw and sends real responses back
-- [ ] One scheduled routine: morning brief at 7:30 — pushes 3 cards (weather / one market quote / today's calendar headline) to the device
-- [ ] Brightness dim after 2 min idle; IMU tap-to-wake
-- [ ] Pocket-sized "dismiss" gesture (swipe or double-tap IMU)
-- **Test:** You've used Pocket for 3 consecutive days without opening the Mac to check OpenClaw, including approving at least one real outbound action from the device.
+Wire OpenClaw in as the actual agent. Grok routes, OpenClaw answers.
+
+- [ ] Add `function` tool `ask_openclaw(prompt: string)` to `session.update`
+- [ ] System instruction: "For anything about the user's email, calendar, files, tasks, or personal context, call ask_openclaw. Otherwise answer from your own knowledge."
+- [ ] On `response.function_call_arguments.done`: spawn OpenClaw CLI with the prompt, capture stdout, return via `conversation.item.create` with `function_call_output`
+- [ ] Send `response.create` to let Grok continue with the tool output
+- [ ] Handle CLI errors (nonzero exit, timeout > 30s) — return the error string so Grok can explain it to the user
+- **Test:** Ask "what emails did I get today?" — Grok calls ask_openclaw → OpenClaw returns real data → Grok speaks it. Same question in Telegram returns the same facts.
+
+## M3: ESP32 firmware — I2S audio + orb + WebSocket
+
+The actual pocket device. Big milestone; split if it gets unwieldy.
+
+- [ ] ESP-IDF project scaffold based on Waveshare's AMOLED-1.8 demo (start from their reference, not from scratch)
+- [ ] Wi-Fi station mode with stored creds; reconnect on drop
+- [ ] ES8311 init over I2C; I2S peripheral configured full-duplex 24kHz 16-bit mono
+- [ ] WebSocket client to the bridge; binary frames for PCM, JSON frames for orb state
+- [ ] LVGL orb: one animated sphere that scales/glows based on `{idle, listening, speaking, thinking}`
+- [ ] Tap input via FT3168: tap anywhere toggles session start/stop
+- [ ] Mic → bridge streaming; bridge → speaker playback
+- [ ] Bridge forwards xAI state events (`speech_started`, `response.created`, `function_call.created`, `response.done`) to device as orb-state JSON
+- **Test:** Power on, orb idles. Tap → listening, speak → thinking → speaking, Grok answers audibly through the onboard speaker. Walk across the house; Wi-Fi reconnects cleanly. Works on USB power.
+
+## M4: Portable polish
+
+Make it actually pocketable for daily use.
+
+- [ ] Li-ion cell connected via MX1.25; verify charging over USB-C via AXP2101
+- [ ] Screen dim + CPU idle after 30s of no session
+- [ ] IMU tap-to-wake (don't require a screen touch when device is in a pocket)
+- [ ] Low-battery indicator on the orb when < 20%
+- **Test:** Fully charge, unplug USB, use for a full day (≥5 sessions spread out). Battery survives, device stays responsive.
 
 ---
 
-## After M2 (not milestones yet — review with user before promoting)
+## After M4 (not milestones yet — review with user before promoting)
 
-- A second routine you actually want (whatever emerged as useful during M2)
-- Card history (scroll back through the day's agent activity)
-- Voice-to-text push-to-talk *if* glance-and-tap feels insufficient
+- Wake-word (only if tap friction becomes the real limiter)
+- Transcript scrollback (re-read what was said earlier in the day)
+- A second function tool if OpenClaw turns out to be the wrong answer for some category
+- Face-down mute gesture via IMU
