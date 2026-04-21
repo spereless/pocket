@@ -4,79 +4,63 @@
 M3b — WebSocket bridge + full voice loop on real hardware
 
 ## In Progress
-**Slice 2 (firmware WebSocket client) is in progress and flaky.** The firmware builds and flashes, and the device has successfully connected to the bridge and streamed PCM in prior test runs, but the connection flaps repeatedly under sustained audio and the current flashed state is not reliably reaching the bridge. Slice 1 (bridge side) is solid.
+**Slices 2 + 4 are DONE. Next up: Slice 3 (orb UI).** The full voice loop works end-to-end on real hardware: user holds BOOT, speaks into the onboard mic, Grok transcribes correctly, Grok's reply plays smoothly through the onboard speaker. Verified today with phrase "What's the weather like in San Francisco today?" — transcribed exactly, reply was clean all the way through.
 
-## Done in M3b so far
+## Done in M3b
 
 ### Slice 1 — Bridge WS server + audio-IO refactor ✅
+Unchanged from prior session. `bridge/device-ws.js`, `bridge/audio_io.js`, `bridge/voice.js`.
 
-Files created/modified under `bridge/`:
-- `device-ws.js` — WebSocketServer on port **8789** (NOT 8787 — that port is claimed by a `ghostload` process on 127.0.0.1). Single client. Binary = PCM16 @ 24kHz mono. Text = JSON control/state.
-- `audio_io.js` — factory returns `createMacAudioIo` (default) or `createDeviceAudioIo` (when `POCKET_MODE=device`). Interface: `start / onChunk / play / endResponse / stopPlayback / stop / sendState`.
-- `device_loopback.js` — throwaway test client: captures Mac mic and streams to bridge, plays received PCM on Mac speakers. Used to validate bridge plumbing without firmware.
-- `voice.js` — refactored: no longer imports `record`/`Speaker` directly; delegates to `audio_io`. Mac mode is unchanged behavior, still the default.
+### Slice 2 — Firmware WS client ✅ (finally)
+`firmware/pocket/main/bridge_ws.{c,h}`, `i2s_es8311_example.c`, `wifi.c`. WebSocket client on port 8789, I2S @ 24 kHz mono, PA gating in spk_task, Wi-Fi PS=NONE, WS keepalive ping 10 s.
 
-**Test: PASSED** — ran `POCKET_MODE=device node voice.js` + `node device_loopback.js`, spoke into Mac mic → saw `[you speaking...]` → `[you] Hello?` → `[grok] Hello! How can I help you today?` → heard reply through Mac speakers via loopback. Byte counters climbed on both sides (`mic→bridge 581632 B`, `bridge→spk 117600 B`). Speaker buffer-underflow warnings in loopback are cosmetic (same M1 `speaker` lifecycle quirk, logged in lessons) — won't ship since firmware uses I2S not CoreAudio.
+### Slice 4 — PTT button ✅ (done ahead of Slice 3 — you can't sanely test without it)
+BOOT (GPIO 0) gates mic uplink. Press → `{"action":"down"}` text frame → bridge clears xAI input buffer + interrupts. Release → `{"action":"up"}` → bridge commits + response.create. Server VAD disabled.
 
-### Slice 2 — Firmware WS client ⚠️ FLAKY
+## Context / Gotchas from today
 
-Files created/modified under `firmware/pocket/main/`:
-- `bridge_ws.{c,h}` — wraps `esp_websocket_client`. API: `bridge_ws_start / send_pcm / receive_pcm / last_rx_audio_us / connected`. Uses an 96 KB FreeRTOS ringbuf for rx PCM. Logs cumulative rx/tx bytes every 2s.
-- `wifi.c` — added `esp_wifi_set_ps(WIFI_PS_NONE)` after `esp_wifi_start()` (power-save was preventing sustained uplink).
-- `secrets.h` — added `POCKET_BRIDGE_URL "ws://192.168.4.69:8789"` (Mac Mini's en1 Wi-Fi IP — en0 Ethernet has the SAME IP but Ethernet↔Wi-Fi ARP bridging is unreliable. Mac and ESP32 both on Wi-Fi works.).
-- `example_config.h` — `EXAMPLE_SAMPLE_RATE` 16000 → 24000; `EXAMPLE_MCLK_MULTIPLE` 384 → **256**. The 256× is required: ES8311 driver rejects MCLK=24000×384=9.216 MHz with ESP_ERR_INVALID_ARG.
-- `i2s_es8311_example.c` — replaced record-then-play `i2s_echo` task with streaming `mic_task` (reads I2S → sends WS binary) + `spk_task` (drains WS rx → I2S write). 4096-byte chunks (~85 ms at 24 kHz mono — 1024 was too chatty, flooded xAI with small frames). PA (GPIO 46) hard-muted at boot; `spk_task` raises it on first incoming byte, drops after 500 ms of no rx. Mic task has a 1-second echo gate using `last_rx_audio_us`. Dead `err_reason[]` const and the `#if CONFIG_EXAMPLE_MODE_MUSIC` branch still present — music task no longer compiled but dead-code refactor was out of scope.
-- `CMakeLists.txt` — added `bridge_ws.c`; PRIV_REQUIRES gained `esp_timer esp_ringbuf`.
-- `idf_component.yml` — added `espressif/esp_websocket_client: "^1.2.0"`.
+**The three bugs that blocked audio — in the order they bit:**
 
-**Test results so far (automated, run by Claude):**
-- Build clean
-- Device boots, Wi-Fi connects at 192.168.4.86, RSSI -35 dBm, codec init OK
-- First connect to bridge fails with `EHOSTUNREACH errno=119` for a few seconds while Wi-Fi finishes DHCP — auto-reconnect every 2s eventually succeeds
-- With 1024-byte chunks: connection established, streamed ~40 KB then dropped, reconnect loop. After PS-disable: 400+ KB of sustained streaming before drop (big improvement).
-- With 4096-byte chunks + send-backoff (**last flashed state**): not verified live — user ran `voice.js` in device mode and saw **zero device connections** in the bridge log during a ~10s window. Unknown whether device is crashed, off Wi-Fi, or in a reconnect spin.
+1. **Stack overflow** — mic_task/spk_task had 4 KB FreeRTOS stacks with a 4 KB `buf[CHUNK_BYTES]` declared on stack, clobbering list pointers → `vListInsert` null-deref on first `i2s_channel_read`. Fix: 8 KB stacks. Symptom was a LoadProhibited bootloop (EXCVADDR low address like 0x1e8).
 
-**Known unverified:**
-- Does the device now connect reliably with 4 KB chunks?
-- Does downlink audio play on the onboard speaker?
-- Does the 1-second echo gate actually prevent self-trigger feedback?
+2. **Stereo-slot duplication on mic** — Even with `I2S_SLOT_MODE_MONO` + slot_mask=LEFT, the driver reads *both* L and R slots on RX and the codec puts the mono mic signal on both. Result: every adjacent 16-bit pair is identical, byte rate is 2× expected. xAI interprets the stream as half-speed, transcribes mumbled garbage. Fix: **bridge-side dedup** — take every other 16-bit sample in `audio_io.js:dedupFromDevice`. MONO mode on the TX/spk side handles itself — **do not** double on output or you'll hear slow + choppy.
 
-## Context / Gotchas
+3. **Ring buffer too small for xAI's burst pacing** — xAI Realtime generates Grok's audio response faster than realtime (several seconds of content delivered in a short burst). The firmware's 96 KB rx ring overflowed mid-reply, dropping the tail → choppy end of sentence. Fix: **512 KB ring, allocated from PSRAM** via `xRingbufferCreateWithCaps(..., MALLOC_CAP_SPIRAM)`. PSRAM must be enabled in sdkconfig (OCT mode, 80 MHz) — previously the chip booted with internal SRAM only and the PSRAM malloc silently returned NULL.
 
-**Mac IP:** `192.168.4.69` on en1 (Wi-Fi). en0 (Ethernet) reports the same address but Ethernet↔Wi-Fi routing on the router is unreliable, so the device must talk to the Wi-Fi interface specifically.
+**Mic gain sweet spot:** 12 dB (ES8311_MIC_GAIN_12DB). Below that (0–6 dB) the mic is inaudibly quiet; above (24–42 dB) loud speech clips hard. At 12 dB, normal conversational speech peaks around 30% of full-scale with RMS ~6–8%. Clean for xAI.
 
-**Bridge port:** 8789. Do NOT use 8787 (something called `ghostload` listens there on 127.0.0.1).
+**Bridge instrumentation that saved us:**
+- `/tmp/pocket_rx.pcm` — every device-mic byte written to disk for offline analysis
+- Peak meter log every 2 s: `peak=NNNN (NN.N% of full-scale)` — makes clipping vs too-quiet obvious without plugging in ears
+- `afplay /tmp/pocket_rx_24k.wav` on the Mac — lets us hear exactly what the device captured
+These are staying in; they're cheap and invaluable for every future audio regression.
 
-**Firewall:** macOS application firewall is ON. The earlier successful connections prove it doesn't block Node's WS server in practice, but if a fresh session sees "connection refused" from outside, check `socketfilterfw --getappblocked` for Node.
+**Device not reconnecting after bridge restart** — was driving us crazy. Added `ping_interval_sec=10 / pingpong_timeout_sec=20` WS config to make the device detect dead bridges within ~30 s. Still not 100 % verified in the sense of being empirically reproduced post-fix, but no regressions observed and the Slice 3 UI will make it immediately visible if it breaks again.
 
-**The device has no button yet.** Mic is always-on whenever connected. This means:
-- xAI's VAD fires on any sound, including ambient
-- After a reply plays, speaker output leaks into the onboard mic and can re-trigger VAD. The 1-second echo gate after last rx audio is a crude fix; the real fix is Slice 4 (button-gated uplink only when user is speaking).
-- Until Slice 4, testing should be in a quiet room and speak promptly after the device connects.
-
-**Display:** unchanged and showing stale LVGL-smoketest content. The current firmware doesn't drive the AMOLED at all. This is Slice 3 (orb UI). Nothing's broken, just unrefreshed.
+**Mac IP:** `192.168.4.69` on en1 (Wi-Fi). Device IP: `192.168.4.86`.
+**Bridge port:** 8789 (NOT 8787 — ghostload on 127.0.0.1 owns that).
+**USB port:** `/dev/cu.usbmodem31101` currently. Port number renames after unplug/replug — if you can't find it, `ls /dev/cu.usbmodem*`.
+**esptool + serial:** must use `/Users/jarvis/.espressif/python_env/idf5.3_py3.12_env/bin/python` explicitly (the `~/.idfshim` on PATH defeats the venv's bin dir and breaks `python -m esptool`).
 
 **Stable dev flow:**
 ```
 cd ~/Desktop/pocket
-source firmware/activate-idf.sh
+source firmware/activate-idf.sh                                    # once per shell
 idf.py -C firmware/pocket build
-idf.py -C firmware/pocket -p /dev/cu.usbmodem31201 flash
-# In a separate terminal:
+idf.py -C firmware/pocket -p /dev/cu.usbmodem31101 flash
+# In another terminal:
 cd ~/Desktop/pocket/bridge && POCKET_MODE=device node voice.js
-# To read device serial programmatically (native-USB quirk — see lessons):
-python -m esptool --chip esp32s3 -p /dev/cu.usbmodem31201 --after hard_reset run
-# (then read from serial — see prior session for pyserial snippet)
+# Wait for [device-ws] connected: 192.168.4.86 — then hold BOOT + speak
 ```
 
 ## Next Action
 
-**First step in a fresh session:** diagnose current device state before editing anything. In one terminal run the bridge (`POCKET_MODE=device node voice.js`). In another, capture device serial after a hard reset. Look for:
-1. Does Wi-Fi connect? (expect `wifi: connected: ip=192.168.4.86`)
-2. Does `bridge_ws` connect? (expect `bridge_ws: connected to ws://192.168.4.69:8789`)
-3. Does the bridge see `[device-ws] connected: 192.168.4.86`?
-4. Do rx/tx counters on both sides climb?
+**Slice 3 — orb UI (LVGL).** Port the SH8601 AMOLED panel init + LVGL setup from `firmware/lvgl-smoketest/main/example_qspi_with_ram.c`. Draw a single filled circle ~200 px radius, color-mapped to state (see `docs/orb-ui.md`). Add a FreeRTOS queue `ui_set_state(STATE)`; call from:
+- `bridge_ws` connect/disconnect (connected/error)
+- `button_task` down/up (listening when held)
+- `spk_task` on first rx byte (speaking) and PA drop (idle)
+- Bridge text frame `{"orb":"..."}` for thinking (no local signal for that one)
 
-If the device never connects, check that the Mac's IP is still `192.168.4.69` on en1 (DHCP may have shuffled). If the connection establishes but flaps, the 4 KB chunk + backoff fix may need more tuning — next thing to try would be: send from mic_task via a FreeRTOS queue to a dedicated sender task, so mic reads don't block on network. Also worth trying: reduce xAI input rate further by accumulating ~100-200 ms of audio per `input_audio_buffer.append` call (buffer in voice.js between `audio.onChunk` and `sendAudioChunk`).
+This is ~1.5–2 hours of focused LVGL work. Not trivial. Good breakpoint before starting if this session is already long.
 
-After Slice 2 is truly verified (user speaks, Grok's reply plays from onboard speaker), proceed to Slice 3 (LVGL orb UI per [docs/orb-ui.md](docs/orb-ui.md)), then Slice 4 (BOOT button + screen tap), Slice 5 (bridge state-event translation), Slice 6 (final M3b test).
+After Slice 3: Slice 4.1 (screen tap → interrupt), Slice 5 (bridge state-event translation — mostly already wired via sendState hooks), Slice 6 (M3b final test + polish).

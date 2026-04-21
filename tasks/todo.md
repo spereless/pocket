@@ -86,28 +86,35 @@ Broken into 6 slices, each independently testable. See STATUS.md for current pro
 - [x] `bridge/voice.js` — refactored to use the audio_io abstraction
 - **Test: PASSED** — `POCKET_MODE=device node voice.js` + `node device_loopback.js`, Mac→bridge→xAI→bridge→Mac loop sounded like M1
 
-**Slice 2 — Firmware WebSocket client ⚠️ FLAKY**
+**Slice 2 — Firmware WebSocket client ✅**
 - [x] Bump I2S to 24 kHz mono (match xAI's PCM format); MCLK_MULTIPLE = 256 (384 fails for ES8311)
-- [x] `firmware/pocket/main/bridge_ws.{c,h}` — esp_websocket_client wrapper with 96 KB rx ringbuf
+- [x] `firmware/pocket/main/bridge_ws.{c,h}` — esp_websocket_client wrapper with 512 KB rx ringbuf in PSRAM
 - [x] `secrets.h` gains `POCKET_BRIDGE_URL`
 - [x] Disable Wi-Fi power-save (PS=NONE) for sustained uplink
-- [x] Replace record-then-play with continuous `mic_task` + `spk_task`. 4 KB chunks (~85 ms). PA gated off when no rx. 1 s echo gate.
-- [ ] Live verify: user speaks into onboard mic → Grok reply plays from onboard speaker, no connection flap over a full session
-- **Test:** connection holds for ≥30 s under continuous streaming; user's question is transcribed on the bridge; reply is audible from the onboard speaker
+- [x] Replace record-then-play with continuous `mic_task` + `spk_task`. 4 KB chunks (~85 ms). 8 KB task stacks (4 KB overflowed into FreeRTOS lists — LoadProhibited crash).
+- [x] Fix audio corruption: bridge deduplicates mic (L+R slots both contain mono data), mic gain 12 dB, PSRAM ringbuffer to hold xAI's faster-than-realtime bursts
+- [x] PA control: hard-muted at boot; spk_task raises on first rx, drops after 500 ms silence
+- **Test: PASSED** — user held BOOT, said "What's the weather like in San Francisco today?", Grok transcribed it exactly and replied smoothly through onboard speaker.
 
-**Slice 3 — Orb UI (LVGL)**
+**Slice 4 — BOOT button PTT ✅** (done ahead of Slice 3 — needed for clean turn-taking)
+- [x] Read BOOT button (GPIO 0) with internal pullup, 30 ms debounce
+- [x] On press: `mic_open=true`, send `{"kind":"button","action":"down"}` to bridge → bridge clears xAI input buffer, interrupts any active response
+- [x] On release: `mic_open=false`, send `{"action":"up"}` → bridge commits the audio buffer + sends `response.create`
+- [x] Bridge drops mic chunks shorter than 200 ms (accidental taps)
+- [x] Disable server VAD (`turn_detection: null`); PTT drives turn boundaries
+- **Test: PASSED** — clean turn-taking, no ambient self-trigger, no VAD guesswork
+
+**Slice 3 — Orb UI (LVGL)** [next]
 - [ ] Single filled circle, ~200 px radius, centered on AMOLED
 - [ ] Color per state per `docs/orb-ui.md` (`#1a1a3a` / `#00d8ff` / `#ffb020` / `#f0f0ff` / `#ff3030`)
 - [ ] Bridge sends `{ "orb": "..." }` JSON — firmware parses text frames and updates a FreeRTOS queue the LVGL task drains
 - [ ] Clears the stale LVGL-smoketest content that's currently stuck on the panel
 - **Test:** bridge-driven state changes visibly update the orb color with no obvious flicker
 
-**Slice 4 — Inputs**
-- [ ] Read BOOT button (GPIO 0) via ISR + debouncer; edge = session toggle. Send `{"kind":"button"}` to bridge.
+**Slice 4.1 — Screen tap interrupt (leftover from old Slice 4)**
 - [ ] FT3168 touch event on screen = interrupt. Send `{"kind":"tap"}` to bridge.
-- [ ] Firmware-local optimistic transitions match `docs/orb-ui.md` (button → listening; button again → thinking; tap during speaking → idle).
-- [ ] Gate mic uplink so it only streams during `listening`.
-- **Test:** button press flips orb to cyan and starts mic uplink; press again stops mic; tap during reply cancels playback and returns to idle
+- [ ] Tap during speaking cancels playback and returns to idle
+- **Test:** tap during reply cancels playback
 
 **Slice 5 — Bridge state translation**
 - [ ] voice.js maps xAI events → `audio.sendState({orb: "..."})`: speech_started→listening, response.created→thinking, first output_audio.delta→speaking, response.done→idle, response.error→error (transient)

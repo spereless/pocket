@@ -28,6 +28,10 @@ const micBuffer = [];
 let bufferedBytes = 0;
 const MAX_BUFFER_BYTES = SAMPLE_RATE * 2 * 10;
 
+let micOpen = false;        /* PTT: only forward mic chunks to xAI while held */
+let uplinkBytes = 0;        /* bytes of audio sent during the current PTT press */
+let responseActive = false; /* true between response.created and response.done */
+
 function askOpenclaw(prompt, onProc) {
   return new Promise((resolve) => {
     const params = {
@@ -158,9 +162,10 @@ function sendFunctionOutput(callId, output) {
 function interrupt() {
   audio.stopPlayback();
   cancelActiveTool('user interrupted');
-  try {
-    ws?.send(JSON.stringify({ type: 'response.cancel' }));
-  } catch {}
+  if (responseActive) {
+    try { ws?.send(JSON.stringify({ type: 'response.cancel' })); } catch {}
+    responseActive = false;
+  }
 }
 
 function sendAudioChunk(pcm) {
@@ -180,14 +185,41 @@ function flushMicBuffer() {
 
 function startAudio() {
   audio.onChunk((chunk) => {
+    if (!micOpen) return;            /* PTT closed -> drop mic chunk */
     if (sessionReady) {
       sendAudioChunk(chunk);
+      uplinkBytes += chunk.length;
     } else if (bufferedBytes + chunk.length <= MAX_BUFFER_BYTES) {
       micBuffer.push(chunk);
       bufferedBytes += chunk.length;
     }
   });
+  audio.onControl?.(handleDeviceControl);
   audio.start();
+}
+
+function handleDeviceControl(msg) {
+  if (msg?.kind !== 'button') return;
+  if (msg.action === 'down') {
+    console.log('[ptt] down');
+    micOpen = true;
+    uplinkBytes = 0;
+    interrupt();    /* stop any in-flight Grok reply, cancel any tool call */
+    try { ws?.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch {}
+  } else if (msg.action === 'up') {
+    console.log(`[ptt] up (${uplinkBytes} B uplinked)`);
+    micOpen = false;
+    if (!sessionReady) return;
+    if (uplinkBytes < SAMPLE_RATE * 2 * 0.2) {   /* <200 ms of audio: ignore tap */
+      console.log('[ptt] ignored (too short)');
+      try { ws?.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch {}
+      return;
+    }
+    try {
+      ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+      ws.send(JSON.stringify({ type: 'response.create' }));
+    } catch {}
+  }
 }
 
 function connect() {
@@ -207,7 +239,7 @@ function connect() {
           'you MUST call the ask_openclaw function and pass the user\'s question as the prompt. ' +
           'Do not answer personal-data questions from your own knowledge — OpenClaw has the user\'s real data. ' +
           'For general knowledge, math, definitions, or chit-chat, answer directly without calling any tool.',
-        turn_detection: { type: 'server_vad' },
+        turn_detection: null,   /* PTT: device commits via button:up control frame */
         input_audio_transcription: { model: 'grok-2-audio' },
         audio: {
           input:  { format: { type: 'audio/pcm', rate: SAMPLE_RATE } },
@@ -253,8 +285,11 @@ function connect() {
         break;
 
       case 'input_audio_buffer.speech_started':
-        process.stdout.write('\n[you speaking...] ');
-        interrupt();
+        /* PTT mode: ignored (interrupt is driven by button:down). */
+        break;
+
+      case 'response.created':
+        responseActive = true;
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -278,6 +313,7 @@ function connect() {
         break;
 
       case 'response.done': {
+        responseActive = false;
         audio.endResponse();
         // If this response was a tool-call turn, mark its calls as turnClosed
         // and try to drive the reply. A turn can contain multiple function_call items.

@@ -1,6 +1,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
@@ -61,7 +62,11 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
 
 esp_err_t bridge_ws_start(void)
 {
-    rx_ring = xRingbufferCreate(96 * 1024, RINGBUF_TYPE_BYTEBUF);
+    /* 512 KB ≈ 10 s of 48 kB/s audio — xAI bursts Grok's reply faster than
+     * realtime; smaller rings were dropping the tail of long replies.
+     * Allocated from PSRAM because internal SRAM is only ~277 KB. */
+    rx_ring = xRingbufferCreateWithCaps(512 * 1024, RINGBUF_TYPE_BYTEBUF,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!rx_ring) {
         ESP_LOGE(TAG, "ring alloc failed");
         return ESP_FAIL;
@@ -72,6 +77,8 @@ esp_err_t bridge_ws_start(void)
         .reconnect_timeout_ms = 2000,
         .network_timeout_ms = 10000,
         .buffer_size = 4096,
+        .ping_interval_sec = 10,        /* keepalive so we notice a dead bridge */
+        .pingpong_timeout_sec = 20,     /* and reconnect within ~20 s of bridge death */
     };
     client = esp_websocket_client_init(&cfg);
     if (!client) {
@@ -92,6 +99,16 @@ esp_err_t bridge_ws_send_pcm(const void *buf, size_t len)
         return ESP_OK;
     }
     ESP_LOGW(TAG, "send_bin returned %d (len=%u)", sent, (unsigned)len);
+    return ESP_FAIL;
+}
+
+esp_err_t bridge_ws_send_text(const char *text)
+{
+    if (!connected || !client || !text) return ESP_ERR_INVALID_STATE;
+    int len = (int)strlen(text);
+    int sent = esp_websocket_client_send_text(client, text, len, pdMS_TO_TICKS(100));
+    if (sent > 0) return ESP_OK;
+    ESP_LOGW(TAG, "send_text returned %d (len=%d)", sent, len);
     return ESP_FAIL;
 }
 

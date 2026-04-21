@@ -17,6 +17,9 @@ esp_err_t bridge_ws_start(void);
 /* Uplink PCM16 mono @ 24 kHz to the bridge. No-op if not connected. */
 esp_err_t bridge_ws_send_pcm(const void *buf, size_t len);
 
+/* Send a text (JSON) control frame to the bridge. No-op if not connected. */
+esp_err_t bridge_ws_send_text(const char *text);
+
 /* Drain downlinked PCM into the caller-provided buffer. Returns bytes copied.
  * Blocks up to `wait` ticks waiting for data. */
 size_t    bridge_ws_receive_pcm(void *out, size_t max_len, TickType_t wait);

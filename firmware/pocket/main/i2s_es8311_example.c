@@ -74,9 +74,8 @@ static esp_err_t es8311_codec_init(void)
     ESP_RETURN_ON_ERROR(es8311_sample_frequency_config(es_handle, EXAMPLE_SAMPLE_RATE * EXAMPLE_MCLK_MULTIPLE, EXAMPLE_SAMPLE_RATE), TAG, "set es8311 sample frequency failed");
     ESP_RETURN_ON_ERROR(es8311_voice_volume_set(es_handle, EXAMPLE_VOICE_VOLUME, NULL), TAG, "set es8311 volume failed");
     ESP_RETURN_ON_ERROR(es8311_microphone_config(es_handle, false), TAG, "set es8311 microphone failed");
-#if CONFIG_EXAMPLE_MODE_ECHO
-    ESP_RETURN_ON_ERROR(es8311_microphone_gain_set(es_handle, EXAMPLE_MIC_GAIN), TAG, "set es8311 microphone gain failed");
-#endif
+    /* Pocket: always boost mic. Onboard MEMS mic is quiet; without this Grok hallucinates. */
+    ESP_RETURN_ON_ERROR(es8311_microphone_gain_set(es_handle, ES8311_MIC_GAIN_12DB), TAG, "set es8311 microphone gain failed");
     return ESP_OK;
 }
 
@@ -164,7 +163,11 @@ static void i2s_music(void *args)
 #include "bridge_ws.h"
 
 #define CHUNK_BYTES       4096   /* ~85 ms @ 24 kHz mono 16-bit */
-#define ECHO_GATE_US      1000000 /* 1 s suppression after last rx audio */
+#define BUTTON_GPIO       GPIO_NUM_0   /* BOOT button, active low */
+#define BUTTON_POLL_MS    20
+#define BUTTON_DEBOUNCE_MS 30
+
+static volatile bool mic_open = false;
 
 static void mic_task(void *arg)
 {
@@ -173,15 +176,44 @@ static void mic_task(void *arg)
         size_t got = 0;
         esp_err_t ret = i2s_channel_read(rx_handle, buf, sizeof(buf), &got, portMAX_DELAY);
         if (ret != ESP_OK || got == 0) continue;
-        if (!bridge_ws_connected()) {
-            vTaskDelay(pdMS_TO_TICKS(200));
-            continue;
-        }
-        int64_t now = esp_timer_get_time();
-        if (now - bridge_ws_last_rx_audio_us() < ECHO_GATE_US) continue;
+        if (!bridge_ws_connected() || !mic_open) continue;   /* drain & drop unless PTT held */
         if (bridge_ws_send_pcm(buf, got) != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(200));
         }
+    }
+}
+
+static void button_task(void *arg)
+{
+    gpio_config_t btn_cfg = {
+        .pin_bit_mask = (1ULL << BUTTON_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn_cfg);
+
+    bool last_stable = true;          /* idle-high (released) */
+    bool last_raw    = true;
+    int64_t last_change_us = 0;
+    while (1) {
+        bool raw = gpio_get_level(BUTTON_GPIO) != 0;
+        int64_t now = esp_timer_get_time();
+        if (raw != last_raw) {
+            last_raw = raw;
+            last_change_us = now;
+        } else if (raw != last_stable && (now - last_change_us) > (BUTTON_DEBOUNCE_MS * 1000)) {
+            last_stable = raw;
+            bool pressed = !raw;       /* active low */
+            mic_open = pressed;
+            const char *frame = pressed
+                ? "{\"kind\":\"button\",\"action\":\"down\"}"
+                : "{\"kind\":\"button\",\"action\":\"up\"}";
+            ESP_LOGI(TAG, "button %s -> mic_open=%d", pressed ? "DOWN" : "UP", (int)mic_open);
+            bridge_ws_send_text(frame);
+        }
+        vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
     }
 }
 
@@ -233,6 +265,7 @@ void app_main(void)
     }
     gpio_set_level(GPIO_OUTPUT_PA, 0); /* start muted; spk_task raises PA when audio arrives */
     bridge_ws_start();
-    xTaskCreate(spk_task, "spk_task", 4096, NULL, 5, NULL);
-    xTaskCreate(mic_task, "mic_task", 4096, NULL, 4, NULL);
+    xTaskCreate(spk_task, "spk_task", 8192, NULL, 5, NULL);
+    xTaskCreate(mic_task, "mic_task", 8192, NULL, 4, NULL);
+    xTaskCreate(button_task, "button_task", 3072, NULL, 6, NULL);
 }

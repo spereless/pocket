@@ -1,5 +1,72 @@
 # Lessons
 
+## 2026-04-21 — FreeRTOS task with large local buffer → LoadProhibited bootloop
+
+`mic_task` and `spk_task` were created with 4096-byte stacks and each declared `uint8_t buf[CHUNK_BYTES]` (= 4096 bytes) on that stack. The local array blew past the stack into the adjacent FreeRTOS task control block / list pointers. First `i2s_channel_read` called `xQueueReceive` → `vTaskPlaceOnEventList` → `vListInsert` which dereferenced a corrupted list pointer → LoadProhibited panic at very low addresses (EXCVADDR like 0x1e8, 0xffff). Panic repeated every boot so it looked like a firmware-init bug, not a stack issue.
+
+**Fix:** bump stack to 8192 for both tasks.
+
+**Rule:** if a FreeRTOS task's local variables are anywhere close to half the task's stack size, it WILL overflow into neighboring kernel structures and crash. Stack size = working space + locals + safety margin. Don't put 4 KB buffers on a 4 KB stack. When in doubt, heap-allocate.
+
+**Also useful:** addr2line the panic PC via `xtensa-esp32s3-elf-addr2line -pfiaCe build/*.elf 0x4037f3e2 0x4037f97e ...`. That went straight from panic register dump to "mic_task at i2s_es8311_example.c:174" in seconds.
+
+---
+
+## 2026-04-21 — ES8311 mono RX gives duplicated stereo slots; audio arrives at 2× expected byte rate
+
+Configured I2S RX with `I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(16BIT, MONO)` + slot_mask LEFT. Expected: 24 kHz × 2 bytes = 48 kB/s of mono samples. Observed: 96 kB/s, with every adjacent 16-bit pair exactly identical (100 % pair-duplication across 142k pairs). The codec puts its single mono mic on BOTH L and R slots; the driver in MONO-RX mode still delivers both. xAI saw half-speed audio, transcribed garbage.
+
+**Fix in `bridge/audio_io.js`:** `dedupFromDevice(buf)` takes every other 16-bit sample before forwarding to xAI. Byte count halves; content rate is the correct 24 kHz mono.
+
+**Asymmetry bonus gotcha:** TX/spk side does NOT need duplication. The I2S driver in MONO-TX mode writes the mono sample to both slots automatically. We tried bridge-side duplication on the spk path first — audio came out 2× slow and choppy. Pass-through is correct.
+
+**Rule:** on ES8311 (and probably any mono codec) with ESP-IDF I2S `MONO` mode:
+- **RX (mic):** you receive both slots; dedup in software.
+- **TX (spk):** driver expands your mono stream to fill both slots; send raw mono.
+
+Verify with a rolling PCM capture. Trust byte counts, not configs.
+
+---
+
+## 2026-04-21 — xAI Realtime bursts audio faster than realtime; firmware ringbuffer must buffer entire reply
+
+Grok's TTS doesn't stream at playback rate. A 5-second reply gets delivered from the API in ~2 seconds, then the stream pauses until the next turn. If the device's rx ringbuffer is smaller than the reply, the tail overflows and gets dropped → reply is smooth for the first few seconds then goes choppy mid-sentence.
+
+**Fix:** 512 KB ringbuffer (≈10 s of 48 kB/s audio) allocated from PSRAM via `xRingbufferCreateWithCaps(..., MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)`. Internal SRAM only has ~277 KB free — a 512 KB ring just doesn't fit.
+
+**Required sdkconfig for the Waveshare ESP32-S3 AMOLED 1.8:**
+```
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+```
+Without these the chip boots but PSRAM is absent — MALLOC_CAP_SPIRAM returns NULL silently, and `xRingbufferCreateWithCaps` fails with a log like `ring alloc failed`.
+
+**Rule:** any audio-streaming service whose cadence you don't control → size the device ringbuffer for the worst-case burst, not the average rate. On ESP32-S3 that means PSRAM.
+
+---
+
+## 2026-04-21 — ES8311 mic gain sweet spot is ~12 dB, NOT the default
+
+The codec driver doesn't set mic gain unless `CONFIG_EXAMPLE_MODE_ECHO` is defined, and the default register value is near 0 dB. At 0 dB, speech is inaudible to xAI (~1 % full-scale even held to the mouth). At 36 dB, normal speech clips hard — 5000 saturated samples per second. The transcription model hallucinates plausible English from clipped noise.
+
+**Fix:** unconditionally call `es8311_microphone_gain_set(handle, ES8311_MIC_GAIN_12DB)` in `es8311_codec_init`. At 12 dB, conversational speech held ~3 inches from the board peaks around 30 % and has RMS 6–8 %. Clean transcription.
+
+**Rule for any unfamiliar audio codec:** record, plot peak + RMS, iterate. Don't guess gain. Add a peak-per-second logger to the bridge and keep it in; it'll pay for itself the next time something sounds off.
+
+---
+
+## 2026-04-21 — Bridge-side PCM recording + peak meter is THE audio debugging tool
+
+Spent ~2 hours chasing bad transcription by tweaking mic gain blindly before adding `/tmp/pocket_rx.pcm` + a peak-percentage logger to the bridge. Once in, the answer was obvious in one test cycle: 38.9 % RMS + every-second clipping meant HARD clipping, not "too quiet" (my initial hypothesis). And the 100 % pair-duplication pattern jumped out immediately from a numpy print.
+
+**Rule:** when diagnosing an unknown audio path, the FIRST debug change is "capture the bytes to a file + log peak". Not "adjust gain". Not "try different sample rate". Capture, analyze, then change one thing.
+
+---
+
 ## 2026-04-20 — `speaker` npm package: lazy-create per response
 
 First pass of `voice.js` created one Speaker on `session.updated` and reused it forever. Between responses, CoreAudio's callback kept firing with no data → `buffer underflow` warnings flooded the console. Audio itself worked, but the logs were noise.
