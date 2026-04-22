@@ -72,7 +72,7 @@ Goal: prove the board can capture mic, play back through speaker, and connect to
 - [x] ~~Plain loopback test~~ → replaced with **record-then-play** (feedback-safe): capture 3s with PA gated off, then play buffer with PA on. Live loopback squealed on onboard mic/speaker (see lessons.md)
 - [x] Add Wi-Fi station mode (creds in gitignored `main/secrets.h`), reconnect on disconnect event
 - [x] Print IP + signal strength over serial once connected
-- **Test: PASSED** — on boot, serial shows `wifi: connected: ip=192.168.4.86 rssi=-36 dBm ssid=PerelessWifi`. Record-then-play cycle captures clean mic audio and plays it back through the onboard speaker at volume 80, mic gain 24dB. Audio task currently `#if 0`'d in app_main to keep the board silent between sessions — re-enable when starting M3b.
+- **Test: PASSED** — on boot, serial shows `wifi: connected: ip=<LAN_IP> rssi=-36 dBm ssid=<your-ssid>`. Record-then-play cycle captures clean mic audio and plays it back through the onboard speaker at volume 80, mic gain 24dB. Audio task currently `#if 0`'d in app_main to keep the board silent between sessions — re-enable when starting M3b.
 
 ### M3b: WebSocket bridge + full voice loop
 
