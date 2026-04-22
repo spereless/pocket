@@ -1,14 +1,22 @@
 import 'dotenv/config';
 import WebSocket from 'ws';
 import { Buffer } from 'node:buffer';
-import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { createAudioIo } from './audio_io.js';
+import { OpenclawClient } from './openclaw_client.js';
 
 const SAMPLE_RATE = 24000;
 const OPENCLAW_TIMEOUT_MS = 90_000;
 const OPENCLAW_AGENT = 'main';
 const OPENCLAW_SESSION_KEY = 'agent:main:pocket';
+
+/* Persistent gateway connection: one handshake at bridge boot, then every
+ * ask_openclaw turn goes over the same socket. Replaces the `spawn openclaw
+ * gateway call agent` subprocess which cost ~10 s per turn. */
+const openclaw = new OpenclawClient();
+openclaw.on('ready', () => console.log('[openclaw] ready'));
+openclaw.on('error', (err) => console.error('[openclaw] error:', err.message ?? err));
+openclaw.on('disconnected', ({ code, reason }) => console.warn(`[openclaw] disconnected code=${code} reason=${reason}`));
+openclaw.start();
 
 if (!process.env.XAI_API_KEY?.startsWith('xai-')) {
   console.error('XAI_API_KEY missing or malformed. Paste it into bridge/.env');
@@ -31,59 +39,30 @@ const MAX_BUFFER_BYTES = SAMPLE_RATE * 2 * 10;
 let micOpen = false;        /* PTT: only forward mic chunks to xAI while held */
 let uplinkBytes = 0;        /* bytes of audio sent during the current PTT press */
 let responseActive = false; /* true between response.created and response.done */
+let currentOrbState = null; /* dedupe repeated sendState calls */
+let speakingThisResponse = false;
 
-function askOpenclaw(prompt, onProc) {
-  return new Promise((resolve) => {
-    const params = {
+function setOrb(name) {
+  if (currentOrbState === name) return;
+  currentOrbState = name;
+  audio.sendState?.({ orb: name });
+}
+
+async function askOpenclaw(prompt, { signal } = {}) {
+  if (!openclaw.ready) return 'Error: OpenClaw gateway is not connected.';
+  try {
+    const text = await openclaw.askAgent(prompt, {
       agentId: OPENCLAW_AGENT,
-      message: prompt,
       sessionKey: OPENCLAW_SESSION_KEY,
-      idempotencyKey: randomUUID(),
-      timeout: OPENCLAW_TIMEOUT_MS,
-    };
-    const proc = spawn('openclaw', [
-      'gateway', 'call', 'agent',
-      '--params', JSON.stringify(params),
-      '--expect-final',
-      '--json',
-      '--timeout', String(OPENCLAW_TIMEOUT_MS + 15_000),
-    ]);
-    onProc?.(proc);
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
-
-    const killer = setTimeout(() => {
-      try { proc.kill('SIGKILL'); } catch {}
-    }, OPENCLAW_TIMEOUT_MS + 30_000);
-
-    proc.on('close', (code) => {
-      clearTimeout(killer);
-      if (code !== 0) {
-        resolve(`Error: openclaw exited with code ${code}. ${stderr.trim().slice(0, 400)}`);
-        return;
-      }
-      try {
-        const parsed = JSON.parse(stdout);
-        const text =
-          parsed?.result?.meta?.finalAssistantVisibleText ??
-          parsed?.result?.meta?.finalAssistantRawText ??
-          parsed?.result?.payloads?.[0]?.text;
-        if (typeof text === 'string' && text.length > 0) {
-          resolve(text);
-        } else {
-          resolve('Error: openclaw returned no assistant text.');
-        }
-      } catch (e) {
-        resolve(`Error: could not parse openclaw JSON output. ${e.message}`);
-      }
+      timeoutMs: OPENCLAW_TIMEOUT_MS,
+      signal,
     });
-    proc.on('error', (err) => {
-      clearTimeout(killer);
-      resolve(`Error: could not run openclaw (${err.message}).`);
-    });
-  });
+    if (typeof text === 'string' && text.length > 0) return text;
+    return 'Error: openclaw returned no assistant text.';
+  } catch (err) {
+    if (err?.message === 'aborted') throw err;  /* let caller distinguish cancel */
+    return `Error: openclaw call failed (${err?.message ?? err}).`;
+  }
 }
 
 function maybeRequestReply(callId) {
@@ -98,17 +77,15 @@ function maybeRequestReply(callId) {
 }
 
 let activeToolCallId = null;
-let activeToolProc = null;
+let activeToolAbort = null;
 
 function cancelActiveTool(reason) {
   if (!activeToolCallId) return;
   console.log(`[ask_openclaw] cancel ${activeToolCallId} (${reason})`);
-  if (activeToolProc) {
-    try { activeToolProc.kill('SIGKILL'); } catch {}
-  }
+  try { activeToolAbort?.abort(); } catch {}
   pendingToolCalls.delete(activeToolCallId);
   activeToolCallId = null;
-  activeToolProc = null;
+  activeToolAbort = null;
 }
 
 async function handleFunctionCall(callId, name, argsJson) {
@@ -130,17 +107,26 @@ async function handleFunctionCall(callId, name, argsJson) {
   if (activeToolCallId && activeToolCallId !== callId) {
     cancelActiveTool('superseded by newer call');
   }
+  const abort = new AbortController();
   activeToolCallId = callId;
+  activeToolAbort = abort;
   console.log(`[ask_openclaw] prompt: ${JSON.stringify(prompt)}`);
-  const answer = await askOpenclaw(prompt, (proc) => {
-    if (activeToolCallId === callId) activeToolProc = proc;
-  });
+  let answer;
+  try {
+    answer = await askOpenclaw(prompt, { signal: abort.signal });
+  } catch (err) {
+    if (err?.message === 'aborted') {
+      console.log(`[ask_openclaw] aborted ${callId}`);
+      return;
+    }
+    answer = `Error: ${err?.message ?? err}`;
+  }
   // If we were superseded/cancelled while running, drop the result.
   if (activeToolCallId !== callId) {
     console.log(`[ask_openclaw] dropping stale result for ${callId}`);
     return;
   }
-  activeToolProc = null;
+  activeToolAbort = null;
   activeToolCallId = null;
   console.log(`[ask_openclaw] answer: ${JSON.stringify(answer.slice(0, 200))}${answer.length > 200 ? '…' : ''}`);
   sendFunctionOutput(callId, answer);
@@ -206,6 +192,7 @@ function handleDeviceControl(msg) {
     uplinkBytes = 0;
     interrupt();    /* stop any in-flight Grok reply, cancel any tool call */
     try { ws?.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch {}
+    setOrb('listening');
   } else if (msg.action === 'up') {
     console.log(`[ptt] up (${uplinkBytes} B uplinked)`);
     micOpen = false;
@@ -213,6 +200,8 @@ function handleDeviceControl(msg) {
     if (uplinkBytes < SAMPLE_RATE * 2 * 0.2) {   /* <200 ms of audio: ignore tap */
       console.log('[ptt] ignored (too short)');
       try { ws?.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch {}
+      /* Reset the orb — firmware optimistically went to 'thinking' on release. */
+      setOrb('idle');
       return;
     }
     try {
@@ -290,6 +279,8 @@ function connect() {
 
       case 'response.created':
         responseActive = true;
+        speakingThisResponse = false;
+        setOrb('thinking');
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -297,6 +288,10 @@ function connect() {
         break;
 
       case 'response.output_audio.delta': {
+        if (!speakingThisResponse) {
+          speakingThisResponse = true;
+          setOrb('speaking');
+        }
         const pcm = Buffer.from(event.delta, 'base64');
         audio.play(pcm);
         break;
@@ -315,6 +310,12 @@ function connect() {
       case 'response.done': {
         responseActive = false;
         audio.endResponse();
+        /* Do NOT send orb=idle here. xAI emits response.done as soon as it
+         * finishes generating, but the device is still draining several
+         * seconds of buffered PCM from its PSRAM ring. The device's spk_task
+         * flips to idle when its PA actually drops — that's the real end.
+         * (The firmware's 10s thinking-timeout catches the case where we
+         * never entered speaking at all.) */
         // If this response was a tool-call turn, mark its calls as turnClosed
         // and try to drive the reply. A turn can contain multiple function_call items.
         const items = event.response?.output ?? [];
@@ -332,6 +333,10 @@ function connect() {
 
       case 'error':
         console.error(`\n[error] ${event.code ?? '?'}: ${event.message ?? JSON.stringify(event)}`);
+        setOrb('error');
+        setTimeout(() => {
+          if (currentOrbState === 'error') setOrb('idle');
+        }, 3000);
         break;
     }
   });

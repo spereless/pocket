@@ -4,63 +4,60 @@
 M3b — WebSocket bridge + full voice loop on real hardware
 
 ## In Progress
-**Slices 2 + 4 are DONE. Next up: Slice 3 (orb UI).** The full voice loop works end-to-end on real hardware: user holds BOOT, speaks into the onboard mic, Grok transcribes correctly, Grok's reply plays smoothly through the onboard speaker. Verified today with phrase "What's the weather like in San Francisco today?" — transcribed exactly, reply was clean all the way through.
+**Slice 3 done, Slice 3.5 (OpenClaw persistent gateway) done. Next: Slice 4.1 (screen-tap interrupt).** End-to-end voice loop works on device with visible orb states and ~5.6 s OpenClaw turns (was ~10 s via spawn'd CLI).
 
 ## Done in M3b
 
-### Slice 1 — Bridge WS server + audio-IO refactor ✅
-Unchanged from prior session. `bridge/device-ws.js`, `bridge/audio_io.js`, `bridge/voice.js`.
+### Slices 1, 2, 4 (audio loop + PTT) ✅
+As before. See earlier STATUS entries in git for detail.
 
-### Slice 2 — Firmware WS client ✅ (finally)
-`firmware/pocket/main/bridge_ws.{c,h}`, `i2s_es8311_example.c`, `wifi.c`. WebSocket client on port 8789, I2S @ 24 kHz mono, PA gating in spk_task, Wi-Fi PS=NONE, WS keepalive ping 10 s.
+### Slice 3 — Orb UI (LVGL) ✅
+`main/ui_orb.{c,h}` + `main/components/esp_lcd_sh8601/`. Panel init copied from `firmware/lvgl-smoketest/`. LVGL 8.4 pulled in via `main/idf_component.yml`. Orb = core + two partial-arc rings, ≈130 px total footprint (70% smaller than the original 400 px flat circle).
 
-### Slice 4 — PTT button ✅ (done ahead of Slice 3 — you can't sanely test without it)
-BOOT (GPIO 0) gates mic uplink. Press → `{"action":"down"}` text frame → bridge clears xAI input buffer + interrupts. Release → `{"action":"up"}` → bridge commits + response.create. Server VAD disabled.
+Per-state animations (`apply_state` in `ui_orb.c`):
+- idle: 64↔72 px breathing core, faint outer arc drifting 7 s/rev
+- listening: faster pulse, both arcs counter-rotating
+- thinking: dim small core, arcs spinning opposite directions (metamorphosis feel)
+- speaking: fast speech-like pulse, rings sweeping behind
+- error (not connected): opacity-flash core + both red rings spinning fast
+
+Bridge → device state frames (`{"orb":"..."}`) in `voice.js` cover thinking/speaking/error. `response.done` deliberately does NOT send idle — the device's `spk_task` owns that when the PA actually drops, so the orb stays in "speaking" while the rx ring drains. `button_task` has a 10 s safety net that returns to idle if nothing ever comes back.
+
+### Slice 3.5 — OpenClaw persistent gateway ✅ (pulled forward from backlog)
+`bridge/openclaw_client.js` — ed25519-signed connect handshake, persistent WS to `ws://127.0.0.1:18789`, `askAgent()` helper. Protocol reverse-engineered from the CLI's dist bundle:
+- Device identity reused from `~/.openclaw/identity/` (already paired as operator; gateway allows multiple sockets per device so no conflict with CLI)
+- v3 signature payload: `v3|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce|platform|deviceFamily`
+- `client.id` MUST be one of the enum values (`gateway-client` for backends); free-form strings get rejected with "must match a schema in anyOf"
+- For `agent` method: set `expectFinal` so the client ignores the initial `{status:"accepted"}` ack and waits for the final res with the same id
+
+`voice.js` now calls `openclaw.askAgent(prompt, {signal})` instead of spawning the CLI. Cancel/supersede uses `AbortController.abort()` instead of `SIGKILL`. Smoke test (`bridge/oc_smoketest.js`): 54 ms to ready, 5.6 s for a warm-session agent turn.
 
 ## Context / Gotchas from today
 
-**The three bugs that blocked audio — in the order they bit:**
+- **Transform_zoom on lv_obj leaves stale pixels** when scaling >100% because LVGL only invalidates the object's bbox. The scaled pixels drift outside and the next frame's erase doesn't cover them → "flashing / glitching". Fix: use `lv_obj_set_size` per-frame instead. (Also applies any time we're tempted to use transform for animated widgets — just resize.)
+- **SH8601 has no `swap_xy`** — calling `esp_lcd_panel_swap_xy(panel, false)` raises `ESP_ERR_NOT_SUPPORTED`. Only `mirror(true, false)` is valid.
+- **LVGL DMA draw buffers must stay small** — 368×20×2 B × 2 buffers = ~30 KB. 60 lines × 2 = ~88 KB already fails alloc once WiFi is up (internal SRAM is tight).
+- **Panel's GRAM boots white** — unless you paint a full black frame (via `lv_refr_now` BEFORE `disp_on_off(true)`) the edges flash white at boot.
+- **Port 8789 can silently EADDRINUSE** — if a stale `voice.js` is still bound, the new instance logs it but still connects its own xAI socket, looking like it's "running" while the device can't reach it.
 
-1. **Stack overflow** — mic_task/spk_task had 4 KB FreeRTOS stacks with a 4 KB `buf[CHUNK_BYTES]` declared on stack, clobbering list pointers → `vListInsert` null-deref on first `i2s_channel_read`. Fix: 8 KB stacks. Symptom was a LoadProhibited bootloop (EXCVADDR low address like 0x1e8).
+## Running / rebuilding
 
-2. **Stereo-slot duplication on mic** — Even with `I2S_SLOT_MODE_MONO` + slot_mask=LEFT, the driver reads *both* L and R slots on RX and the codec puts the mono mic signal on both. Result: every adjacent 16-bit pair is identical, byte rate is 2× expected. xAI interprets the stream as half-speed, transcribes mumbled garbage. Fix: **bridge-side dedup** — take every other 16-bit sample in `audio_io.js:dedupFromDevice`. MONO mode on the TX/spk side handles itself — **do not** double on output or you'll hear slow + choppy.
-
-3. **Ring buffer too small for xAI's burst pacing** — xAI Realtime generates Grok's audio response faster than realtime (several seconds of content delivered in a short burst). The firmware's 96 KB rx ring overflowed mid-reply, dropping the tail → choppy end of sentence. Fix: **512 KB ring, allocated from PSRAM** via `xRingbufferCreateWithCaps(..., MALLOC_CAP_SPIRAM)`. PSRAM must be enabled in sdkconfig (OCT mode, 80 MHz) — previously the chip booted with internal SRAM only and the PSRAM malloc silently returned NULL.
-
-**Mic gain sweet spot:** 12 dB (ES8311_MIC_GAIN_12DB). Below that (0–6 dB) the mic is inaudibly quiet; above (24–42 dB) loud speech clips hard. At 12 dB, normal conversational speech peaks around 30% of full-scale with RMS ~6–8%. Clean for xAI.
-
-**Bridge instrumentation that saved us:**
-- `/tmp/pocket_rx.pcm` — every device-mic byte written to disk for offline analysis
-- Peak meter log every 2 s: `peak=NNNN (NN.N% of full-scale)` — makes clipping vs too-quiet obvious without plugging in ears
-- `afplay /tmp/pocket_rx_24k.wav` on the Mac — lets us hear exactly what the device captured
-These are staying in; they're cheap and invaluable for every future audio regression.
-
-**Device not reconnecting after bridge restart** — was driving us crazy. Added `ping_interval_sec=10 / pingpong_timeout_sec=20` WS config to make the device detect dead bridges within ~30 s. Still not 100 % verified in the sense of being empirically reproduced post-fix, but no regressions observed and the Slice 3 UI will make it immediately visible if it breaks again.
-
-**Mac IP:** `192.168.4.69` on en1 (Wi-Fi). Device IP: `192.168.4.86`.
-**Bridge port:** 8789 (NOT 8787 — ghostload on 127.0.0.1 owns that).
-**USB port:** `/dev/cu.usbmodem31101` currently. Port number renames after unplug/replug — if you can't find it, `ls /dev/cu.usbmodem*`.
-**esptool + serial:** must use `/Users/jarvis/.espressif/python_env/idf5.3_py3.12_env/bin/python` explicitly (the `~/.idfshim` on PATH defeats the venv's bin dir and breaks `python -m esptool`).
-
-**Stable dev flow:**
+Bridge (on the Mac Mini):
 ```
-cd ~/Desktop/pocket
+cd ~/Desktop/pocket/bridge
+pkill -f "node voice.js"; sleep 1
+POCKET_MODE=device node voice.js
+```
+
+Firmware (from project root):
+```
 source firmware/activate-idf.sh                                    # once per shell
 idf.py -C firmware/pocket build
 idf.py -C firmware/pocket -p /dev/cu.usbmodem31101 flash
-# In another terminal:
-cd ~/Desktop/pocket/bridge && POCKET_MODE=device node voice.js
-# Wait for [device-ws] connected: 192.168.4.86 — then hold BOOT + speak
 ```
 
 ## Next Action
 
-**Slice 3 — orb UI (LVGL).** Port the SH8601 AMOLED panel init + LVGL setup from `firmware/lvgl-smoketest/main/example_qspi_with_ram.c`. Draw a single filled circle ~200 px radius, color-mapped to state (see `docs/orb-ui.md`). Add a FreeRTOS queue `ui_set_state(STATE)`; call from:
-- `bridge_ws` connect/disconnect (connected/error)
-- `button_task` down/up (listening when held)
-- `spk_task` on first rx byte (speaking) and PA drop (idle)
-- Bridge text frame `{"orb":"..."}` for thinking (no local signal for that one)
+**Slice 4.1 — screen-tap interrupt.** Wire the FT3168 touch controller (already in the LVGL indev chain for the smoketest). Tap anywhere during `speaking` → send `{"kind":"tap"}` to bridge → bridge calls `interrupt()` → audio stops, orb goes idle. I2C already shared with ES8311; touch driver reads via its own panel_io over the same bus. Budget ~45 min.
 
-This is ~1.5–2 hours of focused LVGL work. Not trivial. Good breakpoint before starting if this session is already long.
-
-After Slice 3: Slice 4.1 (screen tap → interrupt), Slice 5 (bridge state-event translation — mostly already wired via sendState hooks), Slice 6 (M3b final test + polish).
+After 4.1: Slice 6 (final M3b test), then M4 (battery + dim + tap-to-wake).

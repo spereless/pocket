@@ -15,7 +15,9 @@ Ideas that arrived too early. Don't touch until v0 (M0–M4) is in daily use and
 - Web dashboard on `localhost:3000` showing live transcript + token usage
 - Local STT/TTS fallback (Whisper + Piper) for when the LAN has no internet
 - Prompt caching on the xAI session to cut cost/latency for repeated system instructions
-- **Pair the bridge as an OpenClaw device** so `ask_openclaw` can talk to the gateway over a persistent WebSocket (like Telegram does) instead of spawning `openclaw gateway call agent` per request. Saves ~1–2s per tool call. Blocked on: `openclaw devices approve` pairing flow, storing a device id + private key in `bridge/.env`, and handling the signed-nonce connect handshake. Only worth doing after M3 when every ms matters for pocket feel.
+- ~~Pair the bridge as an OpenClaw device~~ **DONE 2026-04-22** as Slice 3.5. Reused the CLI's own identity at `~/.openclaw/identity/` rather than pairing a separate device — gateway allows concurrent sockets per deviceId. See `bridge/openclaw_client.js`.
+  - Follow-up: pair a dedicated `pocket-bridge` device so the CLI and bridge don't share a token. Low priority — works fine as-is.
+- `bridge/device-ws.js` should treat `EADDRINUSE` on `listen()` as fatal (`process.exit(1)`) instead of quietly logging and letting voice.js continue running on a dead LAN server. Cost us 30 min of debugging on 2026-04-22.
 
 ## Device capabilities
 - Multiple ESP32s (bedroom, kitchen) sharing the same bridge, each claiming the session exclusively

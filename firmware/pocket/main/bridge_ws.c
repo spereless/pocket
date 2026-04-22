@@ -8,6 +8,7 @@
 
 #include "bridge_ws.h"
 #include "secrets.h"
+#include "ui_orb.h"
 
 static const char *TAG = "bridge_ws";
 
@@ -26,10 +27,12 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "connected to %s", POCKET_BRIDGE_URL);
         connected = true;
+        ui_orb_set_state(POCKET_ORB_IDLE);
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected");
         connected = false;
+        ui_orb_set_state(POCKET_ORB_ERROR);
         break;
     case WEBSOCKET_EVENT_DATA: {
         if (ev->op_code == 0x2 && ev->data_len > 0) {   /* binary = PCM */
@@ -43,6 +46,7 @@ static void ws_event_handler(void *arg, esp_event_base_t base, int32_t event_id,
             }
         } else if (ev->op_code == 0x1 && ev->data_len > 0) {   /* text = control */
             ESP_LOGI(TAG, "control: %.*s", ev->data_len, (const char *)ev->data_ptr);
+            ui_orb_apply_text_frame((const char *)ev->data_ptr, ev->data_len);
         }
         int64_t now = esp_timer_get_time();
         if (now - last_report_us > 2000000) {

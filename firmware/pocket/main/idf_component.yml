@@ -3,6 +3,14 @@ dependencies:
   idf: "^5.0"
   espressif/es8311: "^1.0.0"
   espressif/esp_websocket_client: "^1.2.0"
+  espressif/esp_io_expander_tca9554: "^1.0.1"
+  esp_lcd_sh8601:
+    path: "../components/esp_lcd_sh8601"
+    version: "*"
+    public: true
+  lvgl/lvgl:
+    version: "8.4.*"
+    public: true
 
 # After enabling Board Support Packages support in menuconfig, you can pick you specific BSP here
   espressif/esp-box:

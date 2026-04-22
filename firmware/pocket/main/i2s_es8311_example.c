@@ -161,6 +161,7 @@ static void i2s_music(void *args)
 #else
 #include "esp_timer.h"
 #include "bridge_ws.h"
+#include "ui_orb.h"
 
 #define CHUNK_BYTES       4096   /* ~85 ms @ 24 kHz mono 16-bit */
 #define BUTTON_GPIO       GPIO_NUM_0   /* BOOT button, active low */
@@ -197,6 +198,7 @@ static void button_task(void *arg)
     bool last_stable = true;          /* idle-high (released) */
     bool last_raw    = true;
     int64_t last_change_us = 0;
+    int64_t thinking_since_us = 0;    /* 0 when not in local-thinking */
     while (1) {
         bool raw = gpio_get_level(BUTTON_GPIO) != 0;
         int64_t now = esp_timer_get_time();
@@ -212,6 +214,17 @@ static void button_task(void *arg)
                 : "{\"kind\":\"button\",\"action\":\"up\"}";
             ESP_LOGI(TAG, "button %s -> mic_open=%d", pressed ? "DOWN" : "UP", (int)mic_open);
             bridge_ws_send_text(frame);
+            /* Optimistic local orb transitions — bridge may override shortly after. */
+            ui_orb_set_state(pressed ? POCKET_ORB_LISTENING : POCKET_ORB_THINKING);
+            thinking_since_us = pressed ? 0 : now;
+        }
+        /* Safety net: if we optimistically went to thinking but no audio
+         * started streaming back and no bridge frame arrived, drop to idle
+         * after 10 s so the orb doesn't hang yellow forever. */
+        if (thinking_since_us && (now - thinking_since_us) > 10 * 1000000LL) {
+            ESP_LOGW(TAG, "no response after 10s, returning orb to idle");
+            ui_orb_set_state(POCKET_ORB_IDLE);
+            thinking_since_us = 0;
         }
         vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
     }
@@ -227,7 +240,11 @@ static void spk_task(void *arg)
         int64_t now = esp_timer_get_time();
         if (got > 0) {
             last_rx = now;
-            if (!pa_on) { gpio_set_level(GPIO_OUTPUT_PA, 1); pa_on = true; }
+            if (!pa_on) {
+                gpio_set_level(GPIO_OUTPUT_PA, 1);
+                pa_on = true;
+                ui_orb_set_state(POCKET_ORB_SPEAKING);
+            }
             size_t written = 0;
             while (written < got) {
                 size_t wrote = 0;
@@ -237,6 +254,7 @@ static void spk_task(void *arg)
         } else if (pa_on && (now - last_rx) > 500000) {
             gpio_set_level(GPIO_OUTPUT_PA, 0);
             pa_on = false;
+            ui_orb_set_state(POCKET_ORB_IDLE);
         }
     }
 }
@@ -264,6 +282,9 @@ void app_main(void)
         ESP_LOGI(TAG, "es8311 codec init success");
     }
     gpio_set_level(GPIO_OUTPUT_PA, 0); /* start muted; spk_task raises PA when audio arrives */
+    /* Orb UI: display boots red (error) until bridge WS connects and flips it to idle. */
+    ESP_ERROR_CHECK(ui_orb_start());
+    ui_orb_set_state(POCKET_ORB_ERROR);
     bridge_ws_start();
     xTaskCreate(spk_task, "spk_task", 8192, NULL, 5, NULL);
     xTaskCreate(mic_task, "mic_task", 8192, NULL, 4, NULL);

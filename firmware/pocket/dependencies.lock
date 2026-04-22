@@ -1,4 +1,20 @@
 dependencies:
+  esp_lcd_sh8601:
+    dependencies: []
+    source:
+      path: /Users/jarvis/Desktop/pocket/firmware/pocket/components/esp_lcd_sh8601
+      type: local
+    version: 1.0.0
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.5.3
   espressif/es8311:
     component_hash: 46b3117250344bb03f143d5e2becf81cfb111679fbd7b95cefc2d302d36cc393
     dependencies:
@@ -43,6 +59,30 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.5.7
+  espressif/esp_io_expander:
+    component_hash: 7b7f91270172e46ca4597e3874f48d8412e280e8c295559f5922ec38656e3e5f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.2.1
+  espressif/esp_io_expander_tca9554:
+    component_hash: e9e49ddb1038c2b54b13c51b5e3e6dbdd10a878959c8ab0e0a7c8206316add61
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    - name: espressif/esp_io_expander
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.0.1
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.1
   espressif/esp_lcd_touch:
     component_hash: 3f85a7d95af876f1a6ecca8eb90a81614890d0f03a038390804e5a77e2caf862
     dependencies:
@@ -99,14 +139,18 @@ dependencies:
     component_hash: d7c1ac037ae6e85d94897f807d6e7ba0946a83e720074fc95a4f6241da9f9f53
     dependencies: []
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 8.4.0
 direct_dependencies:
+- esp_lcd_sh8601
+- espressif/cmake_utilities
 - espressif/es8311
 - espressif/esp-box
+- espressif/esp_io_expander_tca9554
 - espressif/esp_websocket_client
 - idf
-manifest_hash: cce51fb8dc4530b7b6412c46d13a0157598980d887d6df6f143d40fdcfc71947
+- lvgl/lvgl
+manifest_hash: 27b5530e0419494a5c8ea0195fe88b93b076dd71d1ea248380ced6d0446010d6
 target: esp32s3
 version: 2.0.0

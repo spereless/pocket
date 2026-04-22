@@ -1,5 +1,125 @@
 # Lessons
 
+## 2026-04-22 — LVGL `transform_zoom` leaves stale pixels outside the bbox
+
+Animated the orb's core via `lv_obj_set_style_transform_zoom` from 230 to 290 (≈90% ↔ 113%). Looked fine for one cycle, then started visibly flickering and eventually the core "disappeared" after a few seconds. LVGL only invalidates the object's bounding box to redraw — but transform scales the RENDERED pixels, not the bbox itself. At zoom > 100% pixels land outside the bbox, and the next frame's invalidation doesn't erase them, so they accumulate.
+
+Setting `transform_pivot_{x,y}` to the object's center doesn't help; it only moves the scaling origin, the bbox is still fixed.
+
+**Fix:** don't use transform on animated widgets. Animate `lv_obj_set_size(obj, v, v)` instead — the bbox tracks the current visible size, so each frame's invalidation exactly matches what was drawn.
+
+**Rule:** `transform_zoom` is for images where you know the bounds in advance, not for solid-color lv_obj widgets whose "size" IS their drawn area. Resize them for real; don't scale the paint.
+
+---
+
+## 2026-04-22 — SH8601 panel driver supports `mirror` but not `swap_xy`
+
+Copying the LVGL smoketest's init sequence into pocket firmware, I called `esp_lcd_panel_swap_xy(panel, false)` to assert a no-swap orientation. At runtime it returns `ESP_ERR_NOT_SUPPORTED` and the sh8601 driver logs "swap_xy is not supported by this panel". Boot hits the ESP_ERROR_CHECK and bootloops.
+
+**Fix:** drop the swap_xy call entirely. Only `esp_lcd_panel_mirror(panel, true, false)` is supported for this driver. The LVGL `drv_update_cb` also shouldn't invoke swap_xy on orientation changes — make it a no-op for this panel.
+
+**Rule:** every LCD driver is a different subset of esp_lcd's API surface. Before porting an init sequence from another board, check which ops the target driver actually implements. `grep -nE "swap_xy|mirror|gap" <driver>.c` in a few seconds saves the bootloop round-trip.
+
+---
+
+## 2026-04-22 — SH8601 power-on GRAM is WHITE; prefill black before disp_on
+
+First successful paint showed the orb on black — but there was a thin white band at the bottom edge of the screen that never cleared. AMOLED powers up with an undefined GRAM state (mostly white on this panel). LVGL only flushes areas it invalidates; any row the first frame doesn't touch stays at whatever was in GRAM.
+
+First attempt: write a DMA strip of zeros before enabling the display. That crashed in `lv_disp_flush_ready` because the panel IO's post_trans callback fires on DMA complete and tried to notify an LVGL driver that wasn't registered yet (StoreProhibited at `disp_drv` null deref).
+
+**Fix:** do the black prefill through LVGL itself, AFTER `lv_disp_drv_register`. Sequence:
+1. Init panel + LVGL + register draw buffers + register driver.
+2. Build the scene (`lv_scr_act()` bg_color = black, widgets added).
+3. `lv_obj_invalidate(lv_scr_act()); lv_refr_now(NULL);` — forces one full-screen paint into panel GRAM.
+4. `esp_lcd_panel_disp_on_off(panel, true)` — only NOW turn on the screen.
+
+The display wakes up with a fully-painted black background + the orb already drawn. Zero flash.
+
+**Rule:** never enable the AMOLED before LVGL has drawn a full frame to GRAM. And if you need to talk to panel IO directly for init-time writes, don't do it once the LVGL flush-ready callback is registered — it WILL fire and deref uninitialized state.
+
+---
+
+## 2026-04-22 — Bridge must NOT send `orb:idle` on xAI `response.done`
+
+First cut of Slice 3 bridge state translation sent `setOrb('idle')` inside the `response.done` handler. User reported the orb dropped to idle mid-reply, with Grok's voice still playing through the speaker.
+
+Why: xAI fires `response.done` as soon as it finishes *generating* — its TTS bursts are faster than realtime, so by the time the event arrives the device still has 5–10 s of audio sitting in its 512 KB PSRAM ring waiting to play. Bridge's "idle" frame overrides the device's correct "speaking" state.
+
+**Fix:** don't send idle from the bridge at all. The firmware's `spk_task` already knows the real end-of-playback: PA drops 500 ms after the last audio chunk. It sets `POCKET_ORB_IDLE` at that moment. Bridge is authoritative for thinking/speaking/error; device is authoritative for idle.
+
+**Rule:** when a layer above you generates content faster than downstream can consume, don't let its "done" event leak as a UX signal. The UX signal is "did the user finish hearing/seeing it," which only the consumer knows.
+
+---
+
+## 2026-04-22 — Local optimistic orb transitions need a safety timeout
+
+Firmware's `button_task` optimistically sets `LISTENING` on press and `THINKING` on release, so the orb reacts instantly without waiting for the bridge. Downside: if the utterance was too short (< 200 ms), the bridge's short-tap path used to just drop the request silently. Orb stayed yellow forever.
+
+**Fix (two layers):**
+1. Bridge's short-tap path sends `{orb: "idle"}` back to reset the device.
+2. Firmware's `button_task` tracks a `thinking_since_us` timestamp after release; if 10 s pass without transitioning out of thinking (via bridge frame or local speaker activity), force IDLE and log.
+
+The bridge fix handles the happy path; the firmware fix is the backstop for any future bridge bug or WS drop during thinking.
+
+**Rule:** any optimistic UI that represents an in-flight operation needs a local deadman timer. The server is allowed to silently never respond; the user isn't allowed to be stuck on your optimistic frame.
+
+---
+
+## 2026-04-22 — Apply-state jitter from WS retry storms — dedupe at the apply boundary
+
+When the bridge was down, `bridge_ws` fires `WEBSOCKET_EVENT_DISCONNECTED` on every reconnect attempt (~every 2 s). Each one called `ui_orb_set_state(POCKET_ORB_ERROR)` → `apply_state` → `cancel_all_anims()` → restart the error anims. Visually: the error animation's phase reset every 2 s, looking like a jitter/skip.
+
+**Fix:** track the last-applied state in `apply_state`; if the incoming state equals it, return early. The animation keeps running at its natural rhythm.
+
+**Rule:** any state-to-animation applier should be idempotent at the state boundary. Don't restart anims on equivalent inputs, only on transitions.
+
+---
+
+## 2026-04-22 — OpenClaw gateway `client.id` is an enum, not free-form
+
+First cut of `bridge/openclaw_client.js` passed `client: { id: "pocket-bridge", ... }` on the connect handshake. Server rejected with:
+```
+invalid connect params: at /client/id: must be equal to constant;
+at /client/id: must match a schema in anyOf
+```
+
+The gateway validates against `GATEWAY_CLIENT_IDS` enum: `webchat-ui | openclaw-control-ui | openclaw-tui | webchat | cli | gateway-client | openclaw-macos | openclaw-ios | openclaw-android | node-host | test | fingerprint | openclaw-probe`. Anything else is rejected during param validation, so the signed payload doesn't even get checked.
+
+**Fix:** use `id: "gateway-client"` (the generic backend). Put the human name in `client.displayName` where free-form is allowed.
+
+**Rule:** when reverse-engineering a protocol from its client bundle, grep the `*_IDS` / `*_NAMES` / `*_MODES` const enums before assuming a field is free-form. `const FOO_IDS = {...}` + `const FOO_ID_SET = new Set(Object.values(FOO_IDS))` is the universal shape of a validated-enum-field.
+
+---
+
+## 2026-04-22 — OpenClaw agent method: expectFinal + two-stage response
+
+The `agent` method returns TWO `res` frames with the same `id`:
+1. First: `{ status: "accepted", ... }` — the gateway acknowledges it's running the turn.
+2. Later: `{ result: { meta: { finalAssistantVisibleText, ... }, payloads: [...] }, ... }` — the actual answer.
+
+A naive client that resolves on the first response gets an empty "accepted" payload and hangs the user.
+
+**Fix:** client's pending-request map carries an `expectFinal` flag. In the response handler, if `expectFinal && payload.status === "accepted"`, keep the pending entry alive and wait for the second res. This mirrors the CLI's own behavior (see `if (pending.expectFinal && status === "accepted") return;` in `client-DkWAat_P.js`).
+
+**Rule:** long-running gateway methods send an ack-then-final pair. Default client behavior should be to wait for the final unless you explicitly asked for the ack only.
+
+---
+
+## 2026-04-22 — Port 8789 EADDRINUSE looks like success until the device can't reach it
+
+Rolled out the OpenClaw client change, restarted `voice.js`. Bridge logged `[openclaw] ready`, `[ready] speak now — Ctrl-C to exit` — every happy-path startup message. Device's orb flipped between states on every button press (local optimistic) but nothing ever reached xAI.
+
+Buried in the logs (but not fatal): `[device-ws] server error: listen EADDRINUSE: address already in use 0.0.0.0:8789`. A previous `voice.js` from an earlier terminal still owned port 8789. The new instance's `ws.on('error')` handler logged the failure but the rest of the startup continued, so it LOOKED like it was running.
+
+**Fix on my side:** always `pkill -f "node voice.js"; sleep 1` before starting a fresh bridge. Logs still showed `[device-ws] listening on 0.0.0.0:8789` BEFORE the error, which is misleading.
+
+**Fix for the code:** `device-ws.js` should treat a listen error as fatal — `process.exit(1)` — rather than quietly logging and continuing. TODO backlog.
+
+**Rule:** when debugging "bridge looks fine but device can't connect", the FIRST check is "is there a stale process on the device's target port". `lsof -iTCP:8789 -sTCP:LISTEN` tells the whole story.
+
+---
+
 ## 2026-04-21 — FreeRTOS task with large local buffer → LoadProhibited bootloop
 
 `mic_task` and `spk_task` were created with 4096-byte stacks and each declared `uint8_t buf[CHUNK_BYTES]` (= 4096 bytes) on that stack. The local array blew past the stack into the adjacent FreeRTOS task control block / list pointers. First `i2s_channel_read` called `xQueueReceive` → `vTaskPlaceOnEventList` → `vListInsert` which dereferenced a corrupted list pointer → LoadProhibited panic at very low addresses (EXCVADDR like 0x1e8, 0xffff). Panic repeated every boot so it looked like a firmware-init bug, not a stack issue.

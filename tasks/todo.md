@@ -104,14 +104,24 @@ Broken into 6 slices, each independently testable. See STATUS.md for current pro
 - [x] Disable server VAD (`turn_detection: null`); PTT drives turn boundaries
 - **Test: PASSED** — clean turn-taking, no ambient self-trigger, no VAD guesswork
 
-**Slice 3 — Orb UI (LVGL)** [next]
-- [ ] Single filled circle, ~200 px radius, centered on AMOLED
-- [ ] Color per state per `docs/orb-ui.md` (`#1a1a3a` / `#00d8ff` / `#ffb020` / `#f0f0ff` / `#ff3030`)
-- [ ] Bridge sends `{ "orb": "..." }` JSON — firmware parses text frames and updates a FreeRTOS queue the LVGL task drains
-- [ ] Clears the stale LVGL-smoketest content that's currently stuck on the panel
-- **Test:** bridge-driven state changes visibly update the orb color with no obvious flicker
+**Slice 3 — Orb UI (LVGL) ✅**
+- [x] Core + two arc rings ≈130 px footprint (scope changed from flat 200 px circle — user feedback)
+- [x] Per-state animations (breathing core size + rotating arcs), not static colors — see `main/ui_orb.c`
+- [x] SH8601 AMOLED brought up from `lvgl-smoketest` — panel pre-cleared to black before disp_on to kill white boot flash
+- [x] Bridge sends `{ "orb": "..." }` frames; firmware parses text frames and drives a FreeRTOS queue the LVGL task drains
+- [x] State dedup guard in `apply_state` so WS retry-storms don't restart anims
+- [x] Bridge no longer sends `orb:idle` on xAI `response.done` — device's spk_task owns that so the orb stays "speaking" until PA actually drops
+- [x] Button_task 10 s safety: local optimistic "thinking" returns to idle if no response ever arrives
+- **Test: PASSED** — user confirmed idle/listening/thinking/speaking/error all render cleanly
 
-**Slice 4.1 — Screen tap interrupt (leftover from old Slice 4)**
+**Slice 3.5 — OpenClaw persistent gateway client ✅** (pulled forward from backlog — slowness was the biggest daily friction)
+- [x] `bridge/openclaw_client.js` — ed25519-signed connect handshake, persistent WS, `askAgent()` helper
+- [x] Reuse CLI's paired identity at `~/.openclaw/identity/` (device.json + device-auth.json); gateway supports concurrent device sockets, so no conflict with CLI
+- [x] `voice.js` drops `spawn('openclaw gateway call agent')` in favour of `openclaw.askAgent(prompt, {signal})`; cancel semantics become AbortController instead of SIGKILL
+- [x] Smoke-tested with `bridge/oc_smoketest.js`: ready in 54 ms, agent turn in ~5.6 s (was ~10 s via CLI)
+- **Test: PASSED** — user confirmed on-device voice turn round-trip works
+
+**Slice 4.1 — Screen tap interrupt (leftover from old Slice 4)** [next]
 - [ ] FT3168 touch event on screen = interrupt. Send `{"kind":"tap"}` to bridge.
 - [ ] Tap during speaking cancels playback and returns to idle
 - **Test:** tap during reply cancels playback
