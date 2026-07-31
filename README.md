@@ -47,6 +47,7 @@ tasks/                 todo.md / STATUS.md / lessons.md / backlog.md
 cd bridge
 npm install
 cp env.example .env    # then put your XAI_API_KEY into .env
+# Generate POCKET_DEVICE_TOKEN with: openssl rand -hex 32
 ```
 
 Run in "mac" mode first to verify the xAI side works via your laptop mic/speakers:
@@ -67,7 +68,8 @@ The bridge talks to the OpenClaw gateway at `ws://127.0.0.1:18789` and reuses th
 
 source firmware/activate-idf.sh
 cp firmware/pocket/main/secrets.h.example firmware/pocket/main/secrets.h
-# Edit secrets.h with your Wi-Fi SSID/password and your Mac's LAN IP + port 8789
+# Edit secrets.h with your Wi-Fi credentials, Mac LAN IP, and the same
+# POCKET_DEVICE_TOKEN used in bridge/.env
 
 idf.py -C firmware/pocket set-target esp32s3
 idf.py -C firmware/pocket build flash monitor -p /dev/cu.usbmodem<N>
@@ -83,6 +85,18 @@ POCKET_MODE=device node voice.js
 # Power the ESP32. The orb should settle on dim-indigo "idle" once it
 # finds Wi-Fi and connects to the bridge.
 # Hold BOOT on the board. Speak. Release. Wait for Grok's reply.
+```
+
+The device WebSocket requires the shared token. Its `ws://` transport is still
+unencrypted, so run it only on a trusted LAN and restrict port 8789 with the host
+firewall. Private transcripts and raw microphone capture are off by default;
+enable `POCKET_DEBUG_PRIVATE=1` or `POCKET_CAPTURE_AUDIO=1` only for deliberate
+local debugging.
+
+The optional desktop loopback client must also use the shared credential:
+
+```
+POCKET_DEVICE_TOKEN=replace-with-the-same-token node device_loopback.js
 ```
 
 ## Orb states

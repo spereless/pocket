@@ -76,8 +76,10 @@ esp_err_t bridge_ws_start(void)
         return ESP_FAIL;
     }
 
+    static const char auth_headers[] = "Authorization: Bearer " POCKET_DEVICE_TOKEN "\r\n";
     esp_websocket_client_config_t cfg = {
         .uri = POCKET_BRIDGE_URL,
+        .headers = auth_headers,
         .reconnect_timeout_ms = 2000,
         .network_timeout_ms = 10000,
         .buffer_size = 4096,

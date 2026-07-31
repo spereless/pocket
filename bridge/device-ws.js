@@ -9,16 +9,34 @@
 //             (bridge -> device = orb state like { orb: "listening" })
 
 import { EventEmitter } from 'node:events';
+import { timingSafeEqual } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 const emitter = new EventEmitter();
 let wss = null;
 let client = null;
 
-export function start(port = 8789) {
-  if (wss) return;
-  wss = new WebSocketServer({ port, host: '0.0.0.0' });
-  console.log(`[device-ws] listening on 0.0.0.0:${port}`);
+function authorized(req, token) {
+  const supplied = req.headers.authorization ?? '';
+  const expected = `Bearer ${token}`;
+  const suppliedBytes = Buffer.from(supplied);
+  const expectedBytes = Buffer.from(expected);
+  return suppliedBytes.length === expectedBytes.length && timingSafeEqual(suppliedBytes, expectedBytes);
+}
+
+export function start(port = 8789, { host = '0.0.0.0', token } = {}) {
+  if (wss) return wss;
+  if (typeof token !== 'string' || token.length < 32) {
+    throw new Error('POCKET_DEVICE_TOKEN must be set to at least 32 characters');
+  }
+  wss = new WebSocketServer({
+    port,
+    host,
+    maxPayload: 64 * 1024,
+    perMessageDeflate: false,
+    verifyClient: ({ req }) => authorized(req, token),
+  });
+  console.log(`[device-ws] listening on ${host}:${port} (authentication required)`);
   wss.on('connection', (ws, req) => {
     if (client) {
       console.log('[device-ws] rejecting second client');
@@ -49,6 +67,7 @@ export function start(port = 8789) {
     ws.on('error', (err) => console.error('[device-ws] ws error:', err.message));
   });
   wss.on('error', (err) => console.error('[device-ws] server error:', err.message));
+  return wss;
 }
 
 export function stop() {

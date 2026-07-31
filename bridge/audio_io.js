@@ -11,14 +11,23 @@
 //   sendState(obj)       push orb-state JSON (device mode only; no-op on Mac)
 
 import record from 'node-record-lpcm16';
-import Speaker from 'speaker';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import * as deviceWs from './device-ws.js';
 
-export function createAudioIo({ sampleRate, port = 8789 } = {}) {
+export function createAudioIo({
+  sampleRate,
+  port = 8789,
+  deviceToken,
+  bindHost = '0.0.0.0',
+  captureAudio = false,
+  capturePath = '/tmp/pocket_rx.pcm',
+} = {}) {
   const mode = process.env.POCKET_MODE === 'device' ? 'device' : 'mac';
   console.log(`[audio-io] mode=${mode}`);
-  if (mode === 'device') return createDeviceAudioIo({ sampleRate, port });
+  if (mode === 'device') {
+    return createDeviceAudioIo({ sampleRate, port, deviceToken, bindHost, captureAudio, capturePath });
+  }
   return createMacAudioIo({ sampleRate });
 }
 
@@ -26,6 +35,17 @@ function createMacAudioIo({ sampleRate }) {
   let mic = null;
   let speaker = null;
   let chunkCb = null;
+
+  function startSpeaker() {
+    const proc = spawn('play', [
+      '-q', '-t', 'raw', '-r', String(sampleRate), '-e', 'signed-integer',
+      '-b', '16', '-c', '1', '-L', '-',
+    ], { stdio: ['pipe', 'ignore', 'pipe'] });
+    proc.on('error', (err) => console.error('[speaker]', err.message));
+    proc.stderr.on('data', (data) => console.error('[speaker]', data.toString().trim()));
+    proc.stdin.on('error', () => {});
+    return proc;
+  }
 
   return {
     start() {
@@ -35,18 +55,18 @@ function createMacAudioIo({ sampleRate }) {
     },
     onChunk(cb) { chunkCb = cb; },
     play(pcm) {
-      if (!speaker) speaker = new Speaker({ channels: 1, bitDepth: 16, sampleRate });
-      try { speaker.write(pcm); } catch {}
+      if (!speaker) speaker = startSpeaker();
+      try { speaker.stdin.write(pcm); } catch {}
     },
     endResponse() {
       if (speaker) {
-        try { speaker.end(); } catch {}
+        try { speaker.stdin.end(); } catch {}
         speaker = null;
       }
     },
     stopPlayback() {
       if (speaker) {
-        try { speaker.destroy(); } catch {}
+        try { speaker.kill('SIGTERM'); } catch {}
         speaker = null;
       }
     },
@@ -84,18 +104,23 @@ function dedupFromDevice(buf) {
  * incoming mono sample to both L and R slots of the PHILIPS frame itself.
  * Duplicating at the bridge layered on top of that, making playback 2x slow. */
 
-function createDeviceAudioIo({ sampleRate, port }) {
+function createDeviceAudioIo({ sampleRate, port, deviceToken, bindHost, captureAudio, capturePath }) {
   let chunkCb = null;
   let controlCb = null;
   let rxBytes = 0, txBytes = 0, rxLastReport = Date.now();
-  /* Debug: write all received PCM to /tmp/pocket_rx.pcm so we can listen to it. */
-  const rxFile = fs.createWriteStream('/tmp/pocket_rx.pcm');
+  let rxFile = null;
+  if (captureAudio) {
+    const fd = fs.openSync(capturePath, 'w', 0o600);
+    fs.fchmodSync(fd, 0o600);
+    rxFile = fs.createWriteStream(null, { fd, autoClose: true });
+    console.warn(`[audio-io] private audio capture enabled: ${capturePath}`);
+  }
   let peakSinceReport = 0;
-  deviceWs.start(port);
+  deviceWs.start(port, { host: bindHost, token: deviceToken });
   deviceWs.on('pcm', (rawBuf) => {
     const buf = dedupFromDevice(rawBuf);
     rxBytes += buf.length;
-    rxFile.write(buf);
+    rxFile?.write(buf);
     /* Track peak amplitude (PCM16 LE) to know if mic is too hot or too quiet. */
     for (let i = 0; i + 1 < buf.length; i += 2) {
       const s = buf.readInt16LE(i);
@@ -127,7 +152,11 @@ function createDeviceAudioIo({ sampleRate, port }) {
     },
     endResponse() { /* device plays whatever it has; orb-state will handle UX later */ },
     stopPlayback() { /* no bridge-side buffer to drop */ },
-    stop() { deviceWs.stop(); },
+    stop() {
+      try { rxFile?.end(); } catch {}
+      rxFile = null;
+      deviceWs.stop();
+    },
     sendState(obj) { deviceWs.sendState(obj); },
   };
 }

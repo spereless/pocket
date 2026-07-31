@@ -14,7 +14,14 @@ const pending = new Map(); // id -> resolve
 
 function send(frame) {
   const s = JSON.stringify(frame);
-  console.log(`[send] ${s.length > 300 ? s.slice(0, 300) + '…' : s}`);
+  const safeFrame = structuredClone(frame);
+  if (safeFrame?.params?.auth) {
+    safeFrame.params.auth = Object.fromEntries(
+      Object.keys(safeFrame.params.auth).map((key) => [key, '[REDACTED]']),
+    );
+  }
+  const safe = JSON.stringify(safeFrame);
+  console.log(`[send] ${safe.length > 300 ? safe.slice(0, 300) + '…' : safe}`);
   ws.send(s);
 }
 

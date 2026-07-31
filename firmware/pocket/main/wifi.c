@@ -26,8 +26,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         wifi_ap_record_t ap;
         int8_t rssi = 0;
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
-        ESP_LOGI(TAG, "connected: ip=" IPSTR " rssi=%d dBm ssid=%s",
-                 IP2STR(&ev->ip_info.ip), rssi, POCKET_WIFI_SSID);
+        ESP_LOGI(TAG, "connected: rssi=%d dBm", rssi);
     }
 }
 
@@ -60,5 +59,5 @@ void pocket_wifi_start(void)
     /* Disable power-save: sustained audio streaming (48 kB/s) hits TCP timeouts under PS. */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
-    ESP_LOGI(TAG, "connecting to %s", POCKET_WIFI_SSID);
+    ESP_LOGI(TAG, "connecting to configured Wi-Fi network");
 }
