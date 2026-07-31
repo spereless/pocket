@@ -2,7 +2,7 @@ dependencies:
   esp_lcd_sh8601:
     dependencies: []
     source:
-      path: /Users/jarvis/Desktop/pocket/firmware/pocket/components/esp_lcd_sh8601
+      path: components/esp_lcd_sh8601
       type: local
     version: 1.0.0
   espressif/cmake_utilities:

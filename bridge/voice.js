@@ -8,6 +8,21 @@ const SAMPLE_RATE = 24000;
 const OPENCLAW_TIMEOUT_MS = 90_000;
 const OPENCLAW_AGENT = 'main';
 const OPENCLAW_SESSION_KEY = 'agent:main:pocket';
+const DEVICE_MODE = process.env.POCKET_MODE === 'device';
+const DEBUG_PRIVATE = process.env.POCKET_DEBUG_PRIVATE === '1';
+
+if (!process.env.XAI_API_KEY?.startsWith('xai-')) {
+  console.error('XAI_API_KEY missing or malformed. Paste it into bridge/.env');
+  process.exit(1);
+}
+if (DEVICE_MODE && (!process.env.POCKET_DEVICE_TOKEN || process.env.POCKET_DEVICE_TOKEN.length < 32)) {
+  console.error('POCKET_DEVICE_TOKEN must be set to at least 32 characters in bridge/.env');
+  process.exit(1);
+}
+
+function logPrivate(message) {
+  if (DEBUG_PRIVATE) console.log(message);
+}
 
 /* Persistent gateway connection: one handshake at bridge boot, then every
  * ask_openclaw turn goes over the same socket. Replaces the `spawn openclaw
@@ -18,14 +33,15 @@ openclaw.on('error', (err) => console.error('[openclaw] error:', err.message ?? 
 openclaw.on('disconnected', ({ code, reason }) => console.warn(`[openclaw] disconnected code=${code} reason=${reason}`));
 openclaw.start();
 
-if (!process.env.XAI_API_KEY?.startsWith('xai-')) {
-  console.error('XAI_API_KEY missing or malformed. Paste it into bridge/.env');
-  process.exit(1);
-}
-
 let ws = null;
 let sessionReady = false;
-const audio = createAudioIo({ sampleRate: SAMPLE_RATE });
+const audio = createAudioIo({
+  sampleRate: SAMPLE_RATE,
+  deviceToken: process.env.POCKET_DEVICE_TOKEN,
+  bindHost: process.env.POCKET_BIND_HOST ?? '0.0.0.0',
+  captureAudio: process.env.POCKET_CAPTURE_AUDIO === '1',
+  capturePath: process.env.POCKET_CAPTURE_PATH ?? '/tmp/pocket_rx.pcm',
+});
 
 // Tool-call state. xAI Realtime uses a two-response pattern: the tool-call
 // response must close (response.done) before we may send response.create to
@@ -110,7 +126,7 @@ async function handleFunctionCall(callId, name, argsJson) {
   const abort = new AbortController();
   activeToolCallId = callId;
   activeToolAbort = abort;
-  console.log(`[ask_openclaw] prompt: ${JSON.stringify(prompt)}`);
+  logPrivate(`[ask_openclaw] prompt: ${JSON.stringify(prompt)}`);
   let answer;
   try {
     answer = await askOpenclaw(prompt, { signal: abort.signal });
@@ -128,7 +144,7 @@ async function handleFunctionCall(callId, name, argsJson) {
   }
   activeToolAbort = null;
   activeToolCallId = null;
-  console.log(`[ask_openclaw] answer: ${JSON.stringify(answer.slice(0, 200))}${answer.length > 200 ? '…' : ''}`);
+  logPrivate(`[ask_openclaw] answer: ${JSON.stringify(answer.slice(0, 200))}${answer.length > 200 ? '…' : ''}`);
   sendFunctionOutput(callId, answer);
 }
 
@@ -284,7 +300,7 @@ function connect() {
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
-        console.log(`\n[you] ${event.transcript}`);
+        logPrivate(`\n[you] ${event.transcript}`);
         break;
 
       case 'response.output_audio.delta': {
@@ -298,11 +314,12 @@ function connect() {
       }
 
       case 'response.output_audio_transcript.done':
-        console.log(`[grok] ${event.transcript}`);
+        logPrivate(`[grok] ${event.transcript}`);
         break;
 
       case 'response.function_call_arguments.done':
-        console.log(`[tool] ${event.name}(${event.arguments}) call_id=${event.call_id}`);
+        console.log(`[tool] ${event.name} call_id=${event.call_id}`);
+        logPrivate(`[tool args] ${event.arguments}`);
         pendingToolCalls.set(event.call_id, { outputSent: false, turnClosed: false, replyRequested: false });
         handleFunctionCall(event.call_id, event.name, event.arguments);
         break;
